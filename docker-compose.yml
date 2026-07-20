@@ -1,0 +1,71 @@
+version: "3.8"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: devcolab-postgres
+    environment:
+      POSTGRES_USER: devcolab
+      POSTGRES_PASSWORD: devcolab
+      POSTGRES_DB: devcolab
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U devcolab -d devcolab"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  collab-server:
+    build:
+      context: ..
+      dockerfile: apps/collab-server/Dockerfile
+    container_name: devcolab-collab-server
+    environment:
+      - NODE_ENV=development
+      - PORT=4000
+      - DATABASE_URL=postgresql://devcolab:devcolab@postgres:5432/devcolab
+      - CORS_ORIGIN=http://localhost:3000
+      - JWT_SECRET=devcolab-jwt-secret-change-in-production
+      - AI_SERVICE_URL=http://ai-service:8000
+    ports:
+      - "4000:4000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  ai-service:
+    build:
+      context: ..
+      dockerfile: apps/ai-service/Dockerfile
+    container_name: devcolab-ai-service
+    environment:
+      - DATABASE_URL=postgresql://devcolab:devcolab@postgres:5432/devcolab
+      - GROQ_API_KEY=${GROQ_API_KEY:-}
+      - HUGGINGFACE_API_TOKEN=${HUGGINGFACE_API_TOKEN:-}
+      - OLLAMA_HOST=${OLLAMA_HOST:-}
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  web:
+    build:
+      context: ..
+      dockerfile: apps/web/Dockerfile
+    container_name: devcolab-web
+    environment:
+      - NODE_ENV=production
+      - NEXT_PUBLIC_COLLAB_SERVER_URL=http://localhost:4000
+      - NEXT_PUBLIC_AI_SERVICE_URL=http://localhost:8000
+    ports:
+      - "3000:3000"
+    depends_on:
+      - collab-server
+      - ai-service
+
+volumes:
+  postgres_data:

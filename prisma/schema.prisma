@@ -1,0 +1,180 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String   @id @default(uuid())
+  email     String   @unique
+  name      String
+  password  String
+  role      UserRole @default(reviewer)
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  sessionsCreated Session[]       @relation("SessionCreator")
+  participants    SessionParticipant[]
+  comments        Comment[]
+  cursors         CursorPresence[]
+
+  @@map("users")
+}
+
+enum UserRole {
+  author
+  reviewer
+  ai_reviewer
+}
+
+model Session {
+  id            String        @id @default(uuid())
+  title         String
+  description   String?
+  repositoryUrl String?       @map("repository_url")
+  status        SessionStatus @default(active)
+  createdById   String        @map("created_by_id")
+  createdAt     DateTime      @default(now()) @map("created_at")
+  updatedAt     DateTime      @updatedAt @map("updated_at")
+
+  creator      User                 @relation("SessionCreator", fields: [createdById], references: [id])
+  participants SessionParticipant[]
+  comments     Comment[]
+  cursors      CursorPresence[]
+  codeFiles    CodeFile[]
+  aiReviews    AIReview[]
+
+  @@map("sessions")
+}
+
+enum SessionStatus {
+  active
+  completed
+  archived
+}
+
+model SessionParticipant {
+  id        String   @id @default(uuid())
+  sessionId String   @map("session_id")
+  userId    String   @map("user_id")
+  joinedAt  DateTime @default(now()) @map("joined_at")
+  leftAt    DateTime? @map("left_at")
+
+  session Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([sessionId, userId])
+  @@map("session_participants")
+}
+
+model CodeFile {
+  id        String   @id @default(uuid())
+  sessionId String   @map("session_id")
+  filePath  String   @map("file_path")
+  content   String
+  language  String?
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  session  Session   @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  comments Comment[]
+
+  @@unique([sessionId, filePath])
+  @@map("code_files")
+}
+
+model Comment {
+  id           String          @id @default(uuid())
+  sessionId    String          @map("session_id")
+  codeFileId   String?         @map("code_file_id")
+  authorId     String          @map("author_id")
+  authorType   CommentAuthorType @map("author_type")
+  category     CommentCategory @default(general)
+  content      String
+  lineStart    Int?            @map("line_start")
+  lineEnd      Int?            @map("line_end")
+  parentId     String?         @map("parent_id")
+  createdAt    DateTime        @default(now()) @map("created_at")
+  updatedAt    DateTime        @updatedAt @map("updated_at")
+
+  session  Session   @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  codeFile CodeFile? @relation(fields: [codeFileId], references: [id], onDelete: Cascade)
+  author   User      @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  parent   Comment?  @relation("CommentReplies", fields: [parentId], references: [id])
+  replies  Comment[] @relation("CommentReplies")
+
+  @@map("comments")
+}
+
+enum CommentAuthorType {
+  human
+  ai
+}
+
+enum CommentCategory {
+  bug
+  security
+  anti_pattern @map("anti-pattern")
+  test
+  general
+}
+
+model CursorPresence {
+  id        String   @id @default(uuid())
+  sessionId String   @map("session_id")
+  userId    String   @map("user_id")
+  filePath  String?  @map("file_path")
+  line      Int?
+  column    Int?
+  color     String   @default("#10b981")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  session Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([sessionId, userId])
+  @@map("cursor_presence")
+}
+
+model AIReview {
+  id        String   @id @default(uuid())
+  sessionId String   @map("session_id")
+  agentType AgentType @map("agent_type")
+  status    AIReviewStatus @default(pending)
+  result    String?
+  filePath  String?  @map("file_path")
+  lineStart Int?     @map("line_start")
+  lineEnd   Int?     @map("line_end")
+  severity  Severity? @default(info)
+  createdAt DateTime @default(now()) @map("created_at")
+  completedAt DateTime? @map("completed_at")
+
+  session Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@map("ai_reviews")
+}
+
+enum AgentType {
+  bug_detection
+  security_scan
+  anti_pattern
+  test_generation
+}
+
+enum AIReviewStatus {
+  pending
+  running
+  completed
+  failed
+}
+
+enum Severity {
+  critical
+  high
+  medium
+  low
+  info
+}

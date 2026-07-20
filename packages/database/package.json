@@ -1,0 +1,27 @@
+{
+  "name": "@devcolab/database",
+  "version": "0.0.1",
+  "private": true,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "db:generate": "../../node_modules/.bin/prisma generate --schema=../../prisma/schema.prisma",
+    "db:migrate": "../../node_modules/.bin/prisma migrate dev --schema=../../prisma/schema.prisma",
+    "db:migrate:prod": "../../node_modules/.bin/prisma migrate deploy --schema=../../prisma/schema.prisma",
+    "db:studio": "../../node_modules/.bin/prisma studio --schema=../../prisma/schema.prisma",
+    "db:seed": "ts-node prisma/seed.ts",
+    "db:reset": "../../node_modules/.bin/prisma migrate reset --force --schema=../../prisma/schema.prisma"
+  },
+  "dependencies": {
+    "@prisma/client": "^5.14.0"
+  },
+  "devDependencies": {
+    "prisma": "^5.14.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.4.5"
+  },
+  "prisma": {
+    "schema": "../../prisma/schema.prisma"
+  }
+}

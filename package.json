@@ -1,0 +1,18 @@
+{
+  "name": "devcolab",
+  "private": true,
+  "scripts": {
+    "dev:web": "pnpm --filter @devcolab/web dev",
+    "dev:collab": "pnpm --filter @devcolab/collab-server dev",
+    "build:web": "pnpm --filter @devcolab/web build",
+    "build:collab": "pnpm --filter @devcolab/collab-server build",
+    "build:types": "pnpm --filter @devcolab/shared-types build"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "devDependencies": {
+    "@prisma/client": "5.14.0",
+    "prisma": "5.14.0"
+  }
+}
