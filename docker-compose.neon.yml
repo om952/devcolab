@@ -1,0 +1,27 @@
+# Overlay for using Neon (or any external managed Postgres) instead of the
+# bundled Postgres container. Stack with the base and prod files:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml \
+#     -f docker-compose.neon.yml up -d --build
+#
+# Set DATABASE_URL (pooled) and DIRECT_URL (unpooled, for migrations) in .env
+# to your Neon connection strings — see the "Using Neon" section in README.
+
+services:
+  # Never started: the "disabled" profile is never activated by `docker
+  # compose up`. Still present so POSTGRES_USER/PASSWORD/DB guards in the base
+  # file don't need to be touched.
+  postgres:
+    profiles: ["disabled"]
+
+  collab-server:
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set to your Neon (pooled) connection string}
+    depends_on: !override
+      redis:
+        condition: service_healthy
+
+  ai-service:
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set to your Neon (pooled) connection string}
+    depends_on: !override {}

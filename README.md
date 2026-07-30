@@ -169,7 +169,8 @@ openssl rand -hex 32   # use for INTERNAL_API_KEY
 | Variable | Service | Notes |
 |---|---|---|
 | `PORT` | collab-server | Defaults to `4000` |
-| `DATABASE_URL` | collab-server, ai-service | `postgresql://devcolab:devcolab@localhost:5433/devcolab` |
+| `DATABASE_URL` | collab-server, ai-service | `postgresql://devcolab:devcolab@localhost:5433/devcolab`. For Neon, use the **pooled** connection string |
+| `DIRECT_URL` | `prisma migrate` only | Unpooled connection for running migrations. Same as `DATABASE_URL` for self-hosted Postgres; Neon's **unpooled** string when using Neon |
 | `JWT_SECRET` | collab-server | **Required.** Min 16 chars. Boot fails in production if left at a known default |
 | `INTERNAL_API_KEY` | collab-server, ai-service | **Required in production.** Must match across both services |
 | `CORS_ORIGIN` / `CORS_ORIGINS` | collab-server / ai-service | Comma-separated allowed browser origins. Cannot be `localhost` in production |
@@ -263,6 +264,9 @@ account — not by whoever clicked the button — so authorship stays truthful.
 
 ## Deploying to production
 
+> Full step-by-step runbook, including a preflight check and rollback
+> procedure: [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md). Summary:
+
 ```bash
 # 1. Point both DNS records at the host before starting (Caddy needs them
 #    resolvable to issue certificates).
@@ -281,7 +285,11 @@ openssl rand -hex 32   # INTERNAL_API_KEY
 #   NEXT_PUBLIC_COLLAB_SERVER_URL=https://api.devcolab.example.com
 #   POSTGRES_PASSWORD=<strong password>
 
-# 3. Apply migrations, then start
+# 3. Check for weak secrets, unresolvable DNS, or an unreachable database
+#    before going any further.
+./scripts/preflight.sh
+
+# 4. Apply migrations, then start
 export DATABASE_URL=postgresql://devcolab:<password>@localhost:5433/devcolab
 pnpm db:migrate
 
@@ -301,6 +309,50 @@ The production overlay differs from the development file in ways that matter:
 
 `ai-service` is deliberately never exposed publicly — it is reachable only from
 `collab-server` on the internal network, guarded by `INTERNAL_API_KEY`.
+
+### Using Neon instead of the bundled Postgres
+
+The bundled `postgres` container works fine for a single box, but you own
+backups yourself. [Neon](https://neon.tech) gives you managed Postgres with a
+free tier (0.5 GB, scales to zero when idle) and drops in with no code
+changes — just an extra compose overlay.
+
+1. Create a Neon project and database.
+2. From the Neon dashboard, copy two connection strings:
+   - the **pooled** one (host contains `-pooler`) → `DATABASE_URL`
+   - the **unpooled** one → `DIRECT_URL`
+
+   Both need `?sslmode=require`. Put them in `.env`:
+
+   ```bash
+   DATABASE_URL=postgresql://user:pass@ep-xxx-pooler.region.aws.neon.tech/devcolab?sslmode=require
+   DIRECT_URL=postgresql://user:pass@ep-xxx.region.aws.neon.tech/devcolab?sslmode=require
+   ```
+
+3. Run migrations against Neon (from anywhere with network access — it
+   doesn't have to be the production host):
+
+   ```bash
+   export DATABASE_URL=postgresql://user:pass@ep-xxx-pooler.region.aws.neon.tech/devcolab?sslmode=require
+   export DIRECT_URL=postgresql://user:pass@ep-xxx.region.aws.neon.tech/devcolab?sslmode=require
+   pnpm db:migrate
+   ```
+
+4. Start the stack with the extra overlay, which disables the `postgres`
+   container and points `collab-server` / `ai-service` at `DATABASE_URL`
+   instead:
+
+   ```bash
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml \
+     -f docker-compose.neon.yml up -d --build
+   ```
+
+`POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` are unused in this mode
+— they only configure the container this overlay disables.
+
+> Free-tier Neon databases scale to zero after inactivity. The first request
+> after idle time takes a few seconds while it wakes up; requests after that
+> are normal speed. Paid tiers remove this.
 
 ### Health probes
 

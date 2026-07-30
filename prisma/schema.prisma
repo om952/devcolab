@@ -3,8 +3,14 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  // Neon's pooled connection (DATABASE_URL) goes through PgBouncer, which
+  // doesn't support the advisory locks Prisma Migrate needs. DIRECT_URL lets
+  // migrations bypass the pooler while the app keeps using the pooled one.
+  // Required whenever migrations run — for self-hosted Postgres (no pooler)
+  // just set it to the same value as DATABASE_URL.
+  directUrl = env("DIRECT_URL")
 }
 
 model User {

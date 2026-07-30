@@ -37,6 +37,8 @@ jobs:
 
     env:
       DATABASE_URL: postgresql://devcolab:devcolab@localhost:5433/devcolab
+      # No pooler in CI's plain Postgres container, so this is the same URL.
+      DIRECT_URL: postgresql://devcolab:devcolab@localhost:5433/devcolab
       JWT_SECRET: ci-test-jwt-secret-minimum16chars
       CORS_ORIGIN: http://localhost:3000
       AI_SERVICE_URL: http://localhost:8000
@@ -188,6 +190,7 @@ jobs:
 
     env:
       DATABASE_URL: postgresql://devcolab:devcolab@localhost:5433/devcolab
+      DIRECT_URL: postgresql://devcolab:devcolab@localhost:5433/devcolab
 
     steps:
       - uses: actions/checkout@v4
@@ -276,3 +279,60 @@ jobs:
           assert sorted(exposed["caddy"]) == ["443", "80"], exposed["caddy"]
           print("production overlay exposes only caddy:80,443")
           PY
+
+      - name: Neon overlay is valid and never starts the postgres container
+        env:
+          JWT_SECRET: ci-compose-secret-minimum-16-chars
+          INTERNAL_API_KEY: ci-compose-internal-key-32-characters
+          CORS_ORIGIN: https://app.example.com
+          DEVCOLAB_DOMAIN: app.example.com
+          DEVCOLAB_API_DOMAIN: api.example.com
+          DATABASE_URL: postgresql://user:pass@ep-xxx-pooler.region.aws.neon.tech/devcolab?sslmode=require
+          DIRECT_URL: postgresql://user:pass@ep-xxx.region.aws.neon.tech/devcolab?sslmode=require
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.prod.yml \
+            -f docker-compose.neon.yml config > /tmp/neon-config.yml
+          python3 - <<'PY'
+          import yaml
+          cfg = yaml.safe_load(open("/tmp/neon-config.yml"))
+          services = cfg["services"]
+          assert "postgres" not in cfg.get("services", {}) or \
+              services["postgres"].get("profiles") == ["disabled"], \
+              "postgres must carry the disabled profile in the neon overlay"
+          for name in ("collab-server", "ai-service"):
+              db_url = services[name]["environment"]["DATABASE_URL"]
+              assert "neon.tech" in db_url, f"{name} DATABASE_URL not overridden: {db_url}"
+              deps = services[name].get("depends_on", {})
+              assert "postgres" not in deps, f"{name} still depends_on postgres: {deps}"
+          print("neon overlay disables postgres and rewires DATABASE_URL")
+          PY
+
+      - name: Preflight rejects weak secrets
+        run: |
+          set +e
+          JWT_SECRET=devcolab-jwt-secret-change-in-production \
+          INTERNAL_API_KEY=ci-compose-internal-key-32-characters \
+          POSTGRES_PASSWORD=devcolab \
+          CORS_ORIGIN=http://localhost:3000 \
+          DEVCOLAB_DOMAIN=app.example.com \
+          DEVCOLAB_API_DOMAIN=api.example.com \
+          DATABASE_URL=postgresql://u:p@localhost/db \
+          ./scripts/preflight.sh --skip-dns --skip-db
+          status=$?
+          set -e
+          if [[ $status -eq 0 ]]; then
+            echo "::error::preflight accepted known-weak secrets"
+            exit 1
+          fi
+          echo "preflight correctly rejected weak secrets"
+
+      - name: Preflight passes with strong secrets
+        run: |
+          JWT_SECRET=$(openssl rand -hex 32) \
+          INTERNAL_API_KEY=$(openssl rand -hex 32) \
+          POSTGRES_PASSWORD=$(openssl rand -hex 16) \
+          CORS_ORIGIN=https://app.example.com \
+          DEVCOLAB_DOMAIN=app.example.com \
+          DEVCOLAB_API_DOMAIN=api.example.com \
+          DATABASE_URL=postgresql://u:p@localhost/db \
+          ./scripts/preflight.sh --skip-dns --skip-db
