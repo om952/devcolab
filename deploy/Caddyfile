@@ -1,0 +1,50 @@
+# Caddy obtains and renews TLS certificates automatically, so there are no
+# certificate paths to manage here. Both hostnames must resolve to this host
+# before the first request.
+
+{
+	# Uncomment to receive expiry notices from Let's Encrypt.
+	# email ops@example.com
+	servers {
+		# Long-lived WebSocket connections must not be cut by a read timeout.
+		timeouts {
+			read_body 30s
+			idle 10m
+		}
+	}
+}
+
+# --- Frontend ---
+{$DEVCOLAB_DOMAIN} {
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "SAMEORIGIN"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+
+	reverse_proxy web:3000
+}
+
+# --- API + WebSocket ---
+{$DEVCOLAB_API_DOMAIN} {
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		-Server
+	}
+
+	# Socket.IO needs connection upgrades and no response buffering; Caddy
+	# handles the upgrade automatically but streaming must stay unbuffered.
+	reverse_proxy collab-server:4000 {
+		flush_interval -1
+	}
+}
+
+# The ai-service is deliberately NOT exposed. It is reachable only from
+# collab-server on the internal Docker network, guarded by INTERNAL_API_KEY.

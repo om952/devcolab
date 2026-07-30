@@ -2,8 +2,14 @@ import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import { z } from "zod";
 import { prisma } from "@devcolab/database";
+import { env } from "./env";
 
-const JWT_SECRET = process.env.JWT_SECRET || "devcolab-jwt-secret";
+const JWT_SECRET = env.JWT_SECRET;
+const JWT_EXPIRES_IN = env.JWT_EXPIRES_IN as jwt.SignOptions["expiresIn"];
+
+function issueToken(userId: string, role: string): string {
+  return jwt.sign({ userId, role }, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
+}
 
 export const loginSchema = z.object({
   email: z.string().email(),
@@ -34,7 +40,7 @@ export async function registerUser(data: RegisterInput) {
     },
   });
 
-  const token = jwt.sign({ userId: user.id, role: user.role }, JWT_SECRET, { expiresIn: "7d" });
+  const token = issueToken(user.id, user.role);
   return { user: { id: user.id, email: user.email, name: user.name, role: user.role }, token };
 }
 
@@ -45,7 +51,7 @@ export async function loginUser(data: LoginInput) {
   const valid = await bcrypt.compare(data.password, user.password);
   if (!valid) throw new Error("Invalid credentials");
 
-  const token = jwt.sign({ userId: user.id, role: user.role }, JWT_SECRET, { expiresIn: "7d" });
+  const token = issueToken(user.id, user.role);
   return { user: { id: user.id, email: user.email, name: user.name, role: user.role }, token };
 }
 

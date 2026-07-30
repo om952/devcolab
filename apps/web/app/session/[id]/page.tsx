@@ -45,6 +45,24 @@ interface CursorUpdate {
   column?: number;
 }
 
+type AgentState = { status: "running" | "completed" | "failed"; issueCount?: number };
+
+interface ReviewProgress {
+  runId: string;
+  agents: Record<string, AgentState>;
+  summary?: string;
+  engine?: string;
+  degraded?: boolean;
+  failed?: boolean;
+}
+
+const AGENT_LABELS: Record<string, string> = {
+  bug_detection: "Bugs",
+  security_scan: "Security",
+  anti_pattern: "Anti-patterns",
+  test_generation: "Tests",
+};
+
 export default function SessionPage() {
   const params = useParams();
   const { user, token } = useAuth();
@@ -64,6 +82,8 @@ export default function SessionPage() {
   const [pasteContent, setPasteContent] = useState("");
   const [pasteFileName, setPasteFileName] = useState("");
   const [uploadLoading, setUploadLoading] = useState(false);
+  const [socketError, setSocketError] = useState<string | null>(null);
+  const [review, setReview] = useState<ReviewProgress | null>(null);
   const fileRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -74,12 +94,29 @@ export default function SessionPage() {
     });
 
     s.on("connect", () => {
-      s.emit("session:join", {
-        sessionId,
-        userId: user.id,
-        userName: user.name,
-      });
+      setSocketError(null);
+      // Identity comes from the JWT in the handshake — the server ignores any
+      // user id sent from the client.
+      s.emit("session:join", { sessionId });
     });
+
+    s.on("connect_error", (err) => {
+      setSocketError(
+        err.message === "Unauthorized"
+          ? "Your session expired. Please sign in again."
+          : "Lost connection to the collaboration server."
+      );
+    });
+
+    s.on("error:validation", (e: { message?: string }) =>
+      setSocketError(e?.message ?? "Invalid request")
+    );
+    s.on("error:not_found", (e: { message?: string }) =>
+      setSocketError(e?.message ?? "Not found")
+    );
+    s.on("error:server", (e: { message?: string }) =>
+      setSocketError(e?.message ?? "Server error")
+    );
 
     s.on("session:joined", (data) => {
       setParticipants(data.participants);
@@ -103,7 +140,55 @@ export default function SessionPage() {
     });
 
     s.on("comment:created", (comment: Comment) => {
-      setComments((prev) => [comment, ...prev]);
+      setComments((prev) =>
+        prev.some((c) => c.id === comment.id) ? prev : [comment, ...prev]
+      );
+    });
+
+    // AI review progress streams in per agent as the pipeline runs.
+    s.on("ai:review_started", (d: { runId: string; agents: string[] }) => {
+      setReview({
+        runId: d.runId,
+        agents: Object.fromEntries(d.agents.map((a) => [a, { status: "running" as const }])),
+      });
+      setAiLoading(true);
+    });
+
+    s.on(
+      "ai:agent_completed",
+      (d: { runId: string; agent: string; issueCount: number; error: string | null }) => {
+        setReview((prev) =>
+          prev && prev.runId === d.runId
+            ? {
+                ...prev,
+                agents: {
+                  ...prev.agents,
+                  [d.agent]: {
+                    status: d.error ? "failed" : "completed",
+                    issueCount: d.issueCount,
+                  },
+                },
+              }
+            : prev
+        );
+      }
+    );
+
+    s.on(
+      "ai:review_completed",
+      (d: { runId: string; summary: string; engine: string; degraded: boolean }) => {
+        setReview((prev) =>
+          prev && prev.runId === d.runId
+            ? { ...prev, summary: d.summary, engine: d.engine, degraded: d.degraded }
+            : prev
+        );
+        setAiLoading(false);
+      }
+    );
+
+    s.on("ai:review_failed", (d: { runId: string }) => {
+      setReview((prev) => (prev && prev.runId === d.runId ? { ...prev, failed: true } : prev));
+      setAiLoading(false);
     });
 
     setSocket(s);
@@ -163,6 +248,7 @@ export default function SessionPage() {
   const triggerAIReview = async () => {
     if (!activeFile) return;
     setAiLoading(true);
+    setReview(null);
     try {
       const res = await fetch(`${API_URL}/api/sessions/${sessionId}/ai-review`, {
         method: "POST",
@@ -172,14 +258,50 @@ export default function SessionPage() {
         },
         body: JSON.stringify({ fileId: activeFile.id }),
       });
-      if (!res.ok) throw new Error("AI review failed");
-      const data = await res.json();
-      alert(`AI Review Complete! ${data.summary || `Found ${data.issuesFound} issues`}`);
-    } catch (err) {
+
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || "Could not start review");
+
+      // 202 — the run is queued. Progress arrives over the socket; poll once as
+      // a safety net in case those events are missed.
+      const runId: string = data.runId;
+      setTimeout(() => pollRun(runId), 90_000);
+    } catch (err: any) {
       console.error(err);
-      alert("AI review failed. Please try again.");
-    } finally {
+      setSocketError(err.message || "AI review failed to start");
       setAiLoading(false);
+    }
+  };
+
+  const pollRun = async (runId: string) => {
+    try {
+      const res = await fetch(`${API_URL}/api/sessions/${sessionId}/ai-review/${runId}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) return;
+      const run = await res.json();
+      if (run.status === "completed" || run.status === "failed") {
+        setReview((prev) =>
+          prev && prev.runId !== runId
+            ? prev
+            : {
+                runId,
+                agents: Object.fromEntries(
+                  (run.agentRuns ?? []).map((a: any) => [
+                    a.agentType,
+                    { status: a.status === "completed" ? "completed" : "failed", issueCount: a.issueCount },
+                  ])
+                ),
+                summary: run.summary,
+                engine: run.engine,
+                degraded: run.degraded,
+                failed: run.status === "failed",
+              }
+        );
+        setAiLoading(false);
+      }
+    } catch {
+      /* best-effort only */
     }
   };
 
@@ -298,6 +420,15 @@ export default function SessionPage() {
 
   return (
     <div className="flex h-screen flex-col">
+      {socketError && (
+        <div className="flex items-center justify-between bg-red-500/10 px-4 py-2 text-sm text-red-300">
+          <span>{socketError}</span>
+          <button onClick={() => setSocketError(null)} className="text-red-400 hover:text-red-200">
+            ✕
+          </button>
+        </div>
+      )}
+
       {/* Header */}
       <div className="flex items-center justify-between border-b border-slate-800 px-4 py-3">
         <div className="flex items-center gap-4">
@@ -324,6 +455,45 @@ export default function SessionPage() {
           </button>
         </div>
       </div>
+
+      {/* AI review progress — one chip per agent, updated as each completes */}
+      {review && (
+        <div className="border-b border-slate-800 bg-slate-900/60 px-4 py-2">
+          <div className="flex flex-wrap items-center gap-2 text-xs">
+            <span className="font-medium text-slate-400">AI Review</span>
+            {Object.entries(review.agents).map(([agent, state]) => (
+              <span
+                key={agent}
+                className={`rounded-full px-2 py-0.5 ${
+                  state.status === "completed"
+                    ? "bg-emerald-500/10 text-emerald-400"
+                    : state.status === "failed"
+                    ? "bg-red-500/10 text-red-400"
+                    : "bg-slate-700/50 text-slate-400"
+                }`}
+              >
+                {AGENT_LABELS[agent] ?? agent}
+                {state.status === "running" && " …"}
+                {state.status === "completed" && ` · ${state.issueCount ?? 0}`}
+                {state.status === "failed" && " · failed"}
+              </span>
+            ))}
+            {review.summary && <span className="text-slate-400">{review.summary}</span>}
+            {review.failed && <span className="text-red-400">Review failed</span>}
+            {review.engine === "heuristic-fallback" && (
+              <span className="rounded bg-amber-500/10 px-2 py-0.5 text-amber-400">
+                AI service unreachable — heuristic scan only
+              </span>
+            )}
+            <button
+              onClick={() => setReview(null)}
+              className="ml-auto text-slate-500 hover:text-slate-300"
+            >
+              ✕
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Main content */}
       <div className="flex flex-1 overflow-hidden">

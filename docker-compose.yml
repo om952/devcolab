@@ -1,71 +1,121 @@
-version: "3.8"
-
 services:
   postgres:
     image: postgres:16-alpine
     container_name: devcolab-postgres
     environment:
-      POSTGRES_USER: devcolab
-      POSTGRES_PASSWORD: devcolab
-      POSTGRES_DB: devcolab
+      POSTGRES_USER: ${POSTGRES_USER:-devcolab}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-devcolab}
+      POSTGRES_DB: ${POSTGRES_DB:-devcolab}
     ports:
       - "5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U devcolab -d devcolab"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-devcolab} -d ${POSTGRES_DB:-devcolab}"]
       interval: 5s
       timeout: 5s
       retries: 5
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: devcolab-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
 
   collab-server:
     build:
-      context: ..
+      context: .
       dockerfile: apps/collab-server/Dockerfile
     container_name: devcolab-collab-server
     environment:
-      - NODE_ENV=development
+      - NODE_ENV=production
       - PORT=4000
-      - DATABASE_URL=postgresql://devcolab:devcolab@postgres:5432/devcolab
-      - CORS_ORIGIN=http://localhost:3000
-      - JWT_SECRET=devcolab-jwt-secret-change-in-production
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-devcolab}:${POSTGRES_PASSWORD:-devcolab}@postgres:5432/${POSTGRES_DB:-devcolab}
+      - "CORS_ORIGIN=${CORS_ORIGIN:?CORS_ORIGIN must be set, e.g. https://app.example.com}"
+      - "JWT_SECRET=${JWT_SECRET:?JWT_SECRET must be set - generate one with openssl rand -hex 32}"
       - AI_SERVICE_URL=http://ai-service:8000
+      - "INTERNAL_API_KEY=${INTERNAL_API_KEY:?INTERNAL_API_KEY must be set - generate one with openssl rand -hex 32}"
+      - SENTRY_DSN=${SENTRY_DSN:-}
+      - REDIS_URL=redis://redis:6379
+      - TRUST_PROXY=${TRUST_PROXY:-1}
     ports:
       - "4000:4000"
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:4000/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
 
   ai-service:
     build:
-      context: ..
+      context: .
       dockerfile: apps/ai-service/Dockerfile
     container_name: devcolab-ai-service
     environment:
-      - DATABASE_URL=postgresql://devcolab:devcolab@postgres:5432/devcolab
+      - ENVIRONMENT=production
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-devcolab}:${POSTGRES_PASSWORD:-devcolab}@postgres:5432/${POSTGRES_DB:-devcolab}
+      - "CORS_ORIGINS=${CORS_ORIGIN:?CORS_ORIGIN must be set}"
       - GROQ_API_KEY=${GROQ_API_KEY:-}
       - HUGGINGFACE_API_TOKEN=${HUGGINGFACE_API_TOKEN:-}
       - OLLAMA_HOST=${OLLAMA_HOST:-}
+      - "INTERNAL_API_KEY=${INTERNAL_API_KEY:?INTERNAL_API_KEY must be set}"
+      - SENTRY_DSN=${SENTRY_DSN:-}
     ports:
       - "8000:8000"
     depends_on:
       postgres:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\" || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
 
   web:
     build:
-      context: ..
+      context: .
       dockerfile: apps/web/Dockerfile
+      # NEXT_PUBLIC_* must be build args — they are inlined into the client
+      # bundle at build time and cannot be injected at runtime.
+      args:
+        NEXT_PUBLIC_COLLAB_SERVER_URL: ${NEXT_PUBLIC_COLLAB_SERVER_URL:-http://localhost:4000}
+        NEXT_PUBLIC_AI_SERVICE_URL: ${NEXT_PUBLIC_AI_SERVICE_URL:-http://localhost:8000}
     container_name: devcolab-web
     environment:
       - NODE_ENV=production
-      - NEXT_PUBLIC_COLLAB_SERVER_URL=http://localhost:4000
-      - NEXT_PUBLIC_AI_SERVICE_URL=http://localhost:8000
     ports:
       - "3000:3000"
     depends_on:
-      - collab-server
-      - ai-service
+      collab-server:
+        condition: service_healthy
+      ai-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/api/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped
 
 volumes:
   postgres_data:
+  redis_data:

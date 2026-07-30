@@ -130,7 +130,8 @@ Once everything is running:
 ```bash
 curl http://localhost:3000/api/health   # {"status":"ok","service":"web"}
 curl http://localhost:4000/health       # {"status":"ok","service":"collab-server"}
-curl http://localhost:8000/health       # {"status":"ok","service":"ai-service"}
+curl http://localhost:8000/health       # liveness: is the process up?
+curl http://localhost:8000/health/ready # readiness: 503 unless an LLM is reachable
 docker compose exec postgres pg_isready -U devcolab -d devcolab   # or: pg_isready -h localhost -p 5433 -U devcolab -d devcolab
 ```
 
@@ -142,24 +143,234 @@ To start all services (including PostgreSQL) in containers:
 
 ```bash
 cd devcolab
+cp .env.example .env    # then fill in JWT_SECRET and INTERNAL_API_KEY
 docker compose up --build
 ```
+
+Compose fails fast if `JWT_SECRET`, `INTERNAL_API_KEY`, or `CORS_ORIGIN` are unset.
+
+> The web image bakes `NEXT_PUBLIC_*` values at **build** time. If you change the
+> API URLs, rebuild with `docker compose build web` — restarting the container
+> alone will not pick them up.
 
 ---
 
 ## Environment variables
 
-| Variable       | Service        | Default                                      |
-|----------------|----------------|----------------------------------------------|
-| `PORT`         | collab-server  | `4000`                                       |
-| `CORS_ORIGIN`  | collab-server  | `http://localhost:3000`                      |
+Copy `.env.example` to `.env` at the repo root before running Docker Compose, and
+copy each app's `.env.example` into place for local (non-Docker) runs.
+
+```bash
+cp .env.example .env
+openssl rand -hex 32   # use for JWT_SECRET
+openssl rand -hex 32   # use for INTERNAL_API_KEY
+```
+
+| Variable | Service | Notes |
+|---|---|---|
+| `PORT` | collab-server | Defaults to `4000` |
 | `DATABASE_URL` | collab-server, ai-service | `postgresql://devcolab:devcolab@localhost:5433/devcolab` |
+| `JWT_SECRET` | collab-server | **Required.** Min 16 chars. Boot fails in production if left at a known default |
+| `INTERNAL_API_KEY` | collab-server, ai-service | **Required in production.** Must match across both services |
+| `CORS_ORIGIN` / `CORS_ORIGINS` | collab-server / ai-service | Comma-separated allowed browser origins. Cannot be `localhost` in production |
+| `REDIS_URL` | collab-server | Enables the Socket.IO adapter and shared rate-limit counters. Required for >1 instance |
+| `TRUST_PROXY` | collab-server | Proxy hops to trust for client IPs. `0` when exposed directly, `1` behind one load balancer |
+| `NEXT_PUBLIC_COLLAB_SERVER_URL` | web | **Build-time.** Inlined into the client bundle; must be set as a Docker build arg, not at runtime |
+| `NEXT_PUBLIC_AI_SERVICE_URL` | web | Build-time, same as above |
 
 > **Note:** DevColab Postgres is exposed on host port **5433** (not 5432) to avoid conflicting with a local PostgreSQL installation.
 
-Copy `.env.example` files into each app as needed (future phases).
+### Security notes
+
+- Socket.IO connections are authenticated during the handshake via the JWT.
+  Client-supplied user ids are ignored — identity always comes from the token.
+- Auth endpoints are rate limited (20 per 15 min per IP); AI review is limited to
+  5 per minute per user. With `REDIS_URL` set, limits are shared across instances.
+- The collab-server refuses to start in production with a default `JWT_SECRET`,
+  a missing `INTERNAL_API_KEY`, or a `localhost` CORS origin.
 
 ---
+
+## Session visibility
+
+Sessions use a **link-share** model, like a document set to "anyone with the
+link":
+
+| Action | Who |
+|---|---|
+| `GET /api/sessions` (dashboard) | Only sessions you created or have joined |
+| `GET /api/sessions/:id` | Anyone authenticated who has the id — opening it enrols you as a participant, so it appears on your dashboard from then on |
+| Socket `session:join` | Same rule |
+| `PATCH` / `DELETE /api/sessions/:id` | **Creator only** — the `author` role does not grant access to other people's sessions |
+
+Session ids are UUIDs, so they are not discoverable by guessing; share the URL
+to invite someone. `PATCH` accepts only `title`, `description`,
+`repositoryUrl` and `status` — unknown fields are rejected rather than written,
+so ownership cannot be reassigned through the API.
+
+## AI review pipeline
+
+Four specialist agents (bug detection, security scanning, anti-pattern analysis,
+test generation) fan out **in parallel** from a LangGraph `StateGraph` and join
+on a consolidation node that merges and severity-orders their findings. Each
+agent is isolated — a failing or timed-out agent degrades only its own findings
+and is reported in `agent_errors`, rather than sinking the run.
+
+Reviews are asynchronous. The HTTP request never blocks on the LLM:
+
+```
+POST /api/sessions/:sessionId/ai-review   { fileId }   -> 202 { runId, status }
+GET  /api/sessions/:sessionId/ai-review               -> paginated run history
+GET  /api/sessions/:sessionId/ai-review/:runId        -> run + per-agent status
+```
+
+Progress streams to the session room over Socket.IO as each agent finishes:
+
+| Event | Payload |
+|---|---|
+| `ai:review_started` | `{ runId, fileId, agents[] }` |
+| `ai:agent_completed` | `{ runId, agent, issueCount, error }` |
+| `comment:created` | the persisted AI comment |
+| `ai:review_completed` | `{ runId, summary, totalIssues, engine, degraded }` |
+| `ai:review_failed` | `{ runId, error }` |
+
+Every run is persisted: `ai_review_runs` holds the job lifecycle and
+`ai_reviews` holds one row per agent (status, issue count, duration, raw JSON
+result).
+
+### Durable jobs
+
+With `REDIS_URL` set, reviews are dispatched through a **BullMQ** queue rather
+than run in the accepting process. The run id doubles as the job id, so:
+
+- a review queued before a crash is picked up after the restart
+- a worker that dies mid-job has it redelivered once the job stalls
+- failures retry with exponential backoff (`AI_REVIEW_JOB_ATTEMPTS`, default 2)
+- a duplicate trigger for the same run is a no-op
+- work is shared across instances, `AI_REVIEW_CONCURRENCY` at a time each
+
+Without `REDIS_URL` the run executes in-process instead, which keeps local
+development working but means a restart loses it. A reconciliation sweep marks
+runs abandoned beyond twice the review timeout as `failed`, so nothing sits in
+`running` forever under either mode.
+
+AI comments are authored by a dedicated `ai-reviewer@devcolab.internal` system
+account — not by whoever clicked the button — so authorship stays truthful.
+
+> If the AI service is unreachable, the run falls back to a local regex scanner
+> and is labelled `engine: "heuristic-fallback"` with `degraded: true`. The UI
+> shows this explicitly; heuristic output is never presented as AI output.
+
+## Deploying to production
+
+```bash
+# 1. Point both DNS records at the host before starting (Caddy needs them
+#    resolvable to issue certificates).
+#      devcolab.example.com      -> A -> <host ip>
+#      api.devcolab.example.com  -> A -> <host ip>
+
+# 2. Configure secrets
+cp .env.example .env
+openssl rand -hex 32   # JWT_SECRET
+openssl rand -hex 32   # INTERNAL_API_KEY
+
+# Also set in .env:
+#   DEVCOLAB_DOMAIN=devcolab.example.com
+#   DEVCOLAB_API_DOMAIN=api.devcolab.example.com
+#   CORS_ORIGIN=https://devcolab.example.com
+#   NEXT_PUBLIC_COLLAB_SERVER_URL=https://api.devcolab.example.com
+#   POSTGRES_PASSWORD=<strong password>
+
+# 3. Apply migrations, then start
+export DATABASE_URL=postgresql://devcolab:<password>@localhost:5433/devcolab
+pnpm db:migrate
+
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+```
+
+The production overlay differs from the development file in ways that matter:
+
+| | Development | Production overlay |
+|---|---|---|
+| Postgres / Redis | published to host | internal network only |
+| App services | ports published | internal network only |
+| Public entry point | each service directly | Caddy on 443, automatic TLS |
+| Health check | liveness | **readiness** — unready instances get no traffic |
+| Containers | root | non-root users |
+| Logs | unbounded | rotated, 10 MB × 3 |
+
+`ai-service` is deliberately never exposed publicly — it is reachable only from
+`collab-server` on the internal network, guarded by `INTERNAL_API_KEY`.
+
+### Health probes
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /health` | Liveness. Never touches downstreams, so a database blip cannot cause healthy instances to be killed |
+| `GET /health/ready` | Readiness. `collab-server` checks Postgres (and reports Redis); `ai-service` checks the LLM provider is actually reachable. Returns `503` when it cannot serve |
+
+### Zero-downtime restarts
+
+Both services drain on `SIGTERM`: connected clients get a `server:shutdown`
+event so they can reconnect elsewhere, Socket.IO and the HTTP server close, then
+database and Redis connections are released. A 15s cap forces exit so a stuck
+connection can never hang a deploy.
+
+### Tracing requests across services
+
+Every request carries an `X-Request-Id` (generated if absent, echoed in the
+response). When `collab-server` calls `ai-service`, it sends the **review run
+id** as that header — so agent logs in `ai-service` can be joined directly to
+the `ai_review_runs` row on the other side.
+
+```bash
+curl -sD- -H 'X-Request-Id: my-trace' https://api.devcolab.example.com/health
+```
+
+### Scaling out
+
+Set `REDIS_URL` before running more than one `collab-server` instance — it backs
+both the Socket.IO adapter (so a broadcast reaches clients on other instances)
+and the rate limiter (so limits are shared rather than per-instance). Set
+`TRUST_PROXY=1` behind a single load balancer so client IPs — and therefore IP
+rate limits — are correct. Leave it at `0` when exposed directly, otherwise
+clients can spoof `X-Forwarded-For` and bypass limits.
+
+## Testing
+
+```bash
+# collab-server — 66 tests (Vitest)
+docker compose up -d postgres   # integration tests need a database
+npx prisma migrate deploy
+pnpm test
+
+# ai-service — 52 tests (pytest)
+cd apps/ai-service
+pip install -r requirements-dev.txt
+pytest -q
+ruff check .
+
+# Browser smoke tests — 9 tests (Playwright)
+npx playwright install chromium
+pnpm build:collab          # the config builds the web app itself
+pnpm test:e2e
+```
+
+The Playwright config boots a real collab-server and a freshly built web
+bundle, then drives Chromium through the landing page, registration, session
+creation, file upload, commenting over Socket.IO, an AI review run, and the
+author-only RBAC rule. It rebuilds the web app on each run because
+`NEXT_PUBLIC_*` is inlined at build time — pointing it at the test server via a
+runtime variable would silently do nothing.
+
+Tests requiring Postgres skip automatically when none is reachable, so
+`pnpm test` still runs the unit suites on a bare checkout. CI runs everything.
+
+CI (`.github/workflows/ci.yml`) additionally verifies that the committed
+migration history matches `schema.prisma` via `prisma migrate diff --exit-code`.
+That check exists because drift had already shipped once — the initial migration
+was missing `comments.file_path`, which broke every inline and AI comment on a
+freshly migrated database.
 
 ## Tech stack
 

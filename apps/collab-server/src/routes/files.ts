@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { z } from "zod";
 import { prisma } from "@devcolab/database";
-import { authenticate, AuthRequest } from "../lib/middleware";
+import { authenticate, authorize, AuthRequest } from "../lib/middleware";
 
 const router = Router({ mergeParams: true });
 
@@ -11,7 +11,7 @@ const createFileSchema = z.object({
   language: z.string().optional(),
 });
 
-router.post("/", authenticate, async (req: AuthRequest, res) => {
+router.post("/", authenticate, authorize("author"), async (req: AuthRequest, res) => {
   try {
     const data = createFileSchema.parse(req.body);
     const file = await prisma.codeFile.create({

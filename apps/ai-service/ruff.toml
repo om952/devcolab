@@ -1,0 +1,13 @@
+line-length = 110
+target-version = "py312"
+exclude = [".venv", "__pycache__"]
+
+[lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = [
+  "E501",  # line length is enforced by the formatter, not the linter
+  "B008",  # FastAPI's Depends()/Security() in defaults is the documented idiom
+]
+
+[lint.per-file-ignores]
+"tests/*" = ["B011"]

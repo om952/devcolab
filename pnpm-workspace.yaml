@@ -4,11 +4,21 @@ packages:
 
 settings:
   ignoreWorkspaceRootCheck: true
+
+# Packages allowed to run install scripts. esbuild is required by vitest and
+# ships a platform binary via its postinstall step.
 onlyBuiltDependencies:
   - "prisma"
   - "@prisma/client"
   - "@prisma/engines"
+  - "esbuild"
+  - "protobufjs"
+  - "msgpackr-extract"
+
 allowBuilds:
-  '@prisma/client': true
-  '@prisma/engines': true
+  "@prisma/client": true
+  "@prisma/engines": true
+  esbuild: true
+  msgpackr-extract: true
   prisma: true
+  protobufjs: true

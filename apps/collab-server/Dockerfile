@@ -29,6 +29,11 @@ COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/apps/collab-server/node_modules ./apps/collab-server/node_modules
 COPY --from=builder /app/packages/shared-types/node_modules ./packages/shared-types/node_modules
 COPY --from=builder /app/packages/database/node_modules ./packages/database/node_modules
+
+# Run as an unprivileged user.
+RUN addgroup -g 1001 -S nodejs && adduser -S -u 1001 -G nodejs collab
+USER collab
+
 WORKDIR /app/apps/collab-server
 EXPOSE 4000
 CMD ["node", "dist/index.js"]

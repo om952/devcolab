@@ -1,62 +1,138 @@
-from typing import TypedDict, List, Optional, AsyncIterator
-import os
+"""LangGraph multi-agent code review pipeline.
+
+Four specialist agents fan out in parallel from START, then a consolidation
+node merges their findings. Each agent is isolated: a failing or slow agent
+records an error and yields no issues rather than failing the whole review.
+"""
+
+from __future__ import annotations
+
+import asyncio
 import json
+import operator
+import re
+from collections.abc import AsyncIterator, Callable
+from dataclasses import dataclass
+from functools import lru_cache
+from typing import Annotated, Any, TypedDict
 
-from langgraph.graph import StateGraph, END
-from langgraph.graph.message import add_messages
+import structlog
+from langchain_core.messages import HumanMessage
+from langgraph.graph import END, START, StateGraph
 
-# Try to use Groq first (free tier), fallback to Ollama
+from app.config import get_settings
+
+logger = structlog.get_logger(service="ai-service", component="agents")
+
 try:
     from langchain_groq import ChatGroq
+
     GROQ_AVAILABLE = True
-except ImportError:
+except ImportError:  # pragma: no cover - depends on install extras
     GROQ_AVAILABLE = False
 
 try:
     from langchain_ollama import ChatOllama
+
     OLLAMA_AVAILABLE = True
-except ImportError:
+except ImportError:  # pragma: no cover - depends on install extras
     OLLAMA_AVAILABLE = False
 
-from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 
-# Model configuration - FREE TIER ONLY
+AGENT_TIMEOUT_SECONDS = 45.0
+"""Per-agent wall clock budget. Exceeding it degrades that agent, not the run."""
+
+MAX_CODE_CHARS = 60_000
+"""Files larger than this are truncated so a single upload cannot blow context."""
+
+VALID_SEVERITIES = ("critical", "high", "medium", "low", "info")
+SEVERITY_ORDER = {name: index for index, name in enumerate(VALID_SEVERITIES)}
+
+
+class NoLLMConfiguredError(RuntimeError):
+    """Raised when neither Groq nor Ollama is usable."""
+
+
+@lru_cache(maxsize=1)
 def get_llm():
-    """Get LLM instance using free APIs only."""
-    groq_key = os.getenv("GROQ_API_KEY")
-    ollama_host = os.getenv("OLLAMA_HOST", "http://localhost:11434")
-    
-    if groq_key and GROQ_AVAILABLE:
+    """Build the LLM client once and reuse it across agents and requests."""
+    settings = get_settings()
+
+    if settings.groq_api_key and GROQ_AVAILABLE:
+        logger.info("llm_selected", provider="groq", model="llama-3.1-8b-instant")
         return ChatGroq(
-            api_key=groq_key,
-            model="llama-3.1-8b-instant",  # Fast, good for code analysis
+            api_key=settings.groq_api_key,
+            model="llama-3.1-8b-instant",
             temperature=0.1,
+            max_retries=2,
         )
-    elif OLLAMA_AVAILABLE:
+
+    if OLLAMA_AVAILABLE:
+        logger.info("llm_selected", provider="ollama", model="codellama:7b")
         return ChatOllama(
-            base_url=ollama_host,
-            model="codellama:7b",  # Code-optimized model
+            base_url=settings.ollama_host,
+            model="codellama:7b",
             temperature=0.1,
         )
-    else:
-        raise RuntimeError(
-            "No free LLM available. Set GROQ_API_KEY or install Ollama."
-        )
+
+    raise NoLLMConfiguredError(
+        "No LLM available. Set GROQ_API_KEY or run Ollama and install langchain-ollama."
+    )
+
+
+_READINESS_TTL_SECONDS = 10.0
+_readiness_cache: tuple[float, bool, str] | None = None
+
+
+async def check_llm_ready() -> tuple[bool, str]:
+    """Readiness check for the configured LLM provider.
+
+    Constructing a client proves nothing — ChatOllama builds fine against a dead
+    host — so for Ollama we actually probe the server. For Groq we can only
+    confirm a key is present without spending a paid call.
+
+    Cached briefly so frequent probes do not hammer the provider.
+    """
+    global _readiness_cache
+
+    now = asyncio.get_event_loop().time()
+    if _readiness_cache and now - _readiness_cache[0] < _READINESS_TTL_SECONDS:
+        return _readiness_cache[1], _readiness_cache[2]
+
+    settings = get_settings()
+    ready, detail = False, "no provider configured"
+
+    if settings.groq_api_key and GROQ_AVAILABLE:
+        ready, detail = True, "groq api key configured"
+    elif OLLAMA_AVAILABLE:
+        try:
+            import httpx
+
+            async with httpx.AsyncClient(timeout=2.0) as client:
+                resp = await client.get(f"{settings.ollama_host.rstrip('/')}/api/tags")
+            ready = resp.status_code == 200
+            detail = "ollama reachable" if ready else f"ollama returned {resp.status_code}"
+        except Exception as exc:  # noqa: BLE001
+            ready, detail = False, f"ollama unreachable: {type(exc).__name__}"
+
+    _readiness_cache = (now, ready, detail)
+    return ready, detail
 
 
 class ReviewState(TypedDict):
     code: str
     language: str
     file_path: str
-    bug_issues: List[dict]
-    security_issues: List[dict]
-    antipattern_issues: List[dict]
-    test_issues: List[dict]
-    consolidated: List[dict]
+    bug_issues: list[dict]
+    security_issues: list[dict]
+    antipattern_issues: list[dict]
+    test_issues: list[dict]
+    # Parallel branches append concurrently, so this needs a merge reducer.
+    agent_errors: Annotated[list[dict], operator.add]
+    consolidated: list[dict]
     summary: str
 
 
-# Agent prompts
 BUG_DETECTION_PROMPT = """You are a bug detection specialist. Analyze the provided code for:
 1. Logic errors and runtime exceptions
 2. Null/undefined dereferences
@@ -148,203 +224,275 @@ Code to analyze:
 """
 
 
-def parse_json_response(text: str) -> List[dict]:
-    """Extract JSON array from LLM response."""
+@dataclass(frozen=True)
+class AgentSpec:
+    """Declarative description of one specialist agent."""
+
+    name: str
+    category: str
+    state_key: str
+    prompt: str
+    default_severity: str
+
+
+AGENT_SPECS: tuple[AgentSpec, ...] = (
+    AgentSpec("bug_detection", "bug", "bug_issues", BUG_DETECTION_PROMPT, "medium"),
+    AgentSpec("security_scan", "security", "security_issues", SECURITY_PROMPT, "high"),
+    AgentSpec("antipattern_analysis", "anti_pattern", "antipattern_issues", ANTIPATTERN_PROMPT, "low"),
+    AgentSpec("test_generation", "test", "test_issues", TEST_PROMPT, "info"),
+)
+
+AGENT_BY_NAME = {spec.name: spec for spec in AGENT_SPECS}
+
+_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL)
+
+
+def parse_json_response(text: str) -> list[dict]:
+    """Extract a JSON array of issues from a model response.
+
+    Models wrap JSON in prose or code fences and occasionally return a bare
+    object instead of an array, so try progressively looser strategies.
+    """
+    if not text:
+        return []
+
+    candidates: list[str] = []
+
+    fenced = _FENCE_RE.search(text)
+    if fenced:
+        candidates.append(fenced.group(1).strip())
+
+    start, end = text.find("["), text.rfind("]")
+    if start != -1 and end > start:
+        candidates.append(text[start : end + 1])
+
+    start, end = text.find("{"), text.rfind("}")
+    if start != -1 and end > start:
+        candidates.append(text[start : end + 1])
+
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+        except (json.JSONDecodeError, ValueError):
+            continue
+
+        if isinstance(parsed, list):
+            return [item for item in parsed if isinstance(item, dict)]
+        if isinstance(parsed, dict):
+            for key in ("issues", "results", "findings"):
+                nested = parsed.get(key)
+                if isinstance(nested, list):
+                    return [item for item in nested if isinstance(item, dict)]
+            return [parsed]
+
+    return []
+
+
+def _coerce_line(value: Any, max_line: int) -> int | None:
+    """Clamp a model-supplied line number into the file's actual range."""
+    if isinstance(value, bool) or value is None:
+        return None
     try:
-        # Try to find JSON array in the response
-        start = text.find("[")
-        end = text.rfind("]")
-        if start != -1 and end != -1:
-            return json.loads(text[start:end+1])
-        return []
-    except json.JSONDecodeError:
-        return []
+        line = int(value)
+    except (TypeError, ValueError):
+        return None
+    if line < 1:
+        return None
+    return min(line, max_line) if max_line else line
 
 
-async def bug_detection_agent(state: ReviewState) -> ReviewState:
-    """Agent 1: Bug detection."""
-    llm = get_llm()
-    prompt = BUG_DETECTION_PROMPT.format(
-        language=state["language"],
-        code=state["code"]
-    )
-    response = await llm.ainvoke([HumanMessage(content=prompt)])
-    issues = parse_json_response(response.content)
-    return {**state, "bug_issues": issues}
+def normalize_issue(raw: dict, spec: AgentSpec, max_line: int) -> dict | None:
+    """Coerce a model-produced issue into the shape the API contract promises."""
+    message = str(raw.get("message") or "").strip()
+    if not message:
+        return None
 
+    severity = str(raw.get("severity") or "").strip().lower()
+    if severity not in SEVERITY_ORDER:
+        severity = spec.default_severity
 
-async def security_agent(state: ReviewState) -> ReviewState:
-    """Agent 2: Security scanning."""
-    llm = get_llm()
-    prompt = SECURITY_PROMPT.format(
-        language=state["language"],
-        code=state["code"]
-    )
-    response = await llm.ainvoke([HumanMessage(content=prompt)])
-    issues = parse_json_response(response.content)
-    return {**state, "security_issues": issues}
+    line_start = _coerce_line(raw.get("line_start"), max_line)
+    line_end = _coerce_line(raw.get("line_end"), max_line)
+    if line_start and line_end and line_end < line_start:
+        line_start, line_end = line_end, line_start
 
+    suggestion = str(raw.get("suggestion") or "").strip() or "No specific suggestion provided."
 
-async def antipattern_agent(state: ReviewState) -> ReviewState:
-    """Agent 3: Anti-pattern analysis."""
-    llm = get_llm()
-    prompt = ANTIPATTERN_PROMPT.format(
-        language=state["language"],
-        code=state["code"]
-    )
-    response = await llm.ainvoke([HumanMessage(content=prompt)])
-    issues = parse_json_response(response.content)
-    return {**state, "antipattern_issues": issues}
-
-
-async def test_agent(state: ReviewState) -> ReviewState:
-    """Agent 4: Test generation."""
-    llm = get_llm()
-    prompt = TEST_PROMPT.format(
-        language=state["language"],
-        code=state["code"]
-    )
-    response = await llm.ainvoke([HumanMessage(content=prompt)])
-    issues = parse_json_response(response.content)
-    return {**state, "test_issues": issues}
-
-
-async def consolidate_results(state: ReviewState) -> ReviewState:
-    """Consolidate all agent results into unified output."""
-    all_issues = []
-    
-    for issue in state.get("bug_issues", []):
-        issue["category"] = "bug"
-        all_issues.append(issue)
-    
-    for issue in state.get("security_issues", []):
-        issue["category"] = "security"
-        all_issues.append(issue)
-    
-    for issue in state.get("antipattern_issues", []):
-        issue["category"] = "anti_pattern"
-        all_issues.append(issue)
-    
-    for issue in state.get("test_issues", []):
-        issue["category"] = "test"
-        all_issues.append(issue)
-    
-    # Sort by severity
-    severity_order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
-    all_issues.sort(key=lambda x: severity_order.get(x.get("severity", "low"), 3))
-    
-    summary = f"Found {len(all_issues)} issues: "
-    summary += f"{len(state.get('bug_issues', []))} bugs, "
-    summary += f"{len(state.get('security_issues', []))} security, "
-    summary += f"{len(state.get('antipattern_issues', []))} anti-patterns, "
-    summary += f"{len(state.get('test_issues', []))} test suggestions."
-    
     return {
-        **state,
-        "consolidated": all_issues,
-        "summary": summary,
+        "category": spec.category,
+        "severity": severity,
+        "line_start": line_start,
+        "line_end": line_end,
+        "message": message[:2_000],
+        "suggestion": suggestion[:2_000],
     }
 
 
-# Build the LangGraph workflow
-workflow = StateGraph(ReviewState)
+async def run_agent(spec: AgentSpec, state: ReviewState) -> dict:
+    """Run one specialist agent.
 
-# Add all agents as nodes
-workflow.add_node("bug_detection", bug_detection_agent)
-workflow.add_node("security_scan", security_agent)
-workflow.add_node("antipattern_analysis", antipattern_agent)
-workflow.add_node("test_generation", test_agent)
-workflow.add_node("consolidate", consolidate_results)
+    Always returns a partial state update touching only this agent's key plus
+    agent_errors — returning the whole state would collide with the other
+    branches running in parallel.
+    """
+    code = state["code"]
+    max_line = code.count("\n") + 1
+    log = logger.bind(agent=spec.name, file_path=state.get("file_path") or None)
 
-# All agents run in parallel from the start
-workflow.set_entry_point("bug_detection")
-workflow.add_edge("bug_detection", "consolidate")
-workflow.add_edge("security_scan", "consolidate")
-workflow.add_edge("antipattern_analysis", "consolidate")
-workflow.add_edge("test_generation", "consolidate")
-workflow.add_edge("consolidate", END)
+    try:
+        llm = get_llm()
+        prompt = spec.prompt.format(language=state["language"], code=code)
+        response = await asyncio.wait_for(
+            llm.ainvoke([HumanMessage(content=prompt)]),
+            timeout=AGENT_TIMEOUT_SECONDS,
+        )
+        raw_issues = parse_json_response(getattr(response, "content", "") or "")
+        issues = [
+            normalized
+            for item in raw_issues
+            if (normalized := normalize_issue(item, spec, max_line)) is not None
+        ]
+        log.info("agent_completed", issues=len(issues))
+        return {spec.state_key: issues, "agent_errors": []}
 
-# Compile the graph
-review_graph = workflow.compile()
+    except TimeoutError:
+        log.warning("agent_timeout", timeout_seconds=AGENT_TIMEOUT_SECONDS)
+        return {
+            spec.state_key: [],
+            "agent_errors": [
+                {"agent": spec.name, "error": f"timed out after {AGENT_TIMEOUT_SECONDS:.0f}s"}
+            ],
+        }
+    except Exception as exc:  # noqa: BLE001 - one agent must not sink the run
+        log.error("agent_failed", error=str(exc), error_type=type(exc).__name__)
+        return {spec.state_key: [], "agent_errors": [{"agent": spec.name, "error": str(exc)}]}
+
+
+def _make_node(spec: AgentSpec) -> Callable[[ReviewState], Any]:
+    async def node(state: ReviewState) -> dict:
+        return await run_agent(spec, state)
+
+    node.__name__ = f"{spec.name}_node"
+    return node
+
+
+def build_summary(state: dict) -> str:
+    counts = {spec.category: len(state.get(spec.state_key) or []) for spec in AGENT_SPECS}
+    total = sum(counts.values())
+    summary = (
+        f"Found {total} issues: {counts['bug']} bugs, {counts['security']} security, "
+        f"{counts['anti_pattern']} anti-patterns, {counts['test']} test suggestions."
+    )
+
+    failed = state.get("agent_errors") or []
+    if failed:
+        names = ", ".join(sorted({item["agent"] for item in failed}))
+        summary += f" ({len(failed)} agent(s) unavailable: {names})"
+    return summary
+
+
+async def consolidate_results(state: ReviewState) -> dict:
+    """Merge every agent's findings into one severity-ordered list."""
+    all_issues: list[dict] = []
+    for spec in AGENT_SPECS:
+        all_issues.extend(state.get(spec.state_key) or [])
+
+    all_issues.sort(key=lambda issue: SEVERITY_ORDER.get(issue.get("severity", "low"), 3))
+
+    return {"consolidated": all_issues, "summary": build_summary(dict(state))}
+
+
+def _build_graph():
+    """Fan out to every agent from START, then join on consolidate."""
+    workflow = StateGraph(ReviewState)
+
+    for spec in AGENT_SPECS:
+        workflow.add_node(spec.name, _make_node(spec))
+    workflow.add_node("consolidate", consolidate_results)
+
+    for spec in AGENT_SPECS:
+        workflow.add_edge(START, spec.name)
+        workflow.add_edge(spec.name, "consolidate")
+
+    workflow.add_edge("consolidate", END)
+    return workflow.compile()
+
+
+review_graph = _build_graph()
+
+
+def initial_state(code: str, language: str, file_path: str) -> ReviewState:
+    truncated = code[:MAX_CODE_CHARS]
+    if len(code) > MAX_CODE_CHARS:
+        logger.warning("code_truncated", original_chars=len(code), kept_chars=MAX_CODE_CHARS)
+
+    return ReviewState(
+        code=truncated,
+        language=language,
+        file_path=file_path,
+        bug_issues=[],
+        security_issues=[],
+        antipattern_issues=[],
+        test_issues=[],
+        agent_errors=[],
+        consolidated=[],
+        summary="",
+    )
 
 
 async def run_code_review(code: str, language: str = "python", file_path: str = "") -> dict:
-    """Run the full multi-agent review pipeline."""
-    initial_state = ReviewState(
-        code=code,
-        language=language,
-        file_path=file_path,
-        bug_issues=[],
-        security_issues=[],
-        antipattern_issues=[],
-        test_issues=[],
-        consolidated=[],
-        summary="",
-    )
-    
-    # Run all agents in parallel manually (since LangGraph parallel execution needs special setup)
-    import asyncio
-    
-    results = await asyncio.gather(
-        bug_detection_agent(initial_state),
-        security_agent(initial_state),
-        antipattern_agent(initial_state),
-        test_agent(initial_state),
-    )
-    
-    # Merge all results
-    merged_state = {
-        **initial_state,
-        "bug_issues": results[0]["bug_issues"],
-        "security_issues": results[1]["security_issues"],
-        "antipattern_issues": results[2]["antipattern_issues"],
-        "test_issues": results[3]["test_issues"],
-    }
-    
-    final = await consolidate_results(merged_state)
-    
+    """Run the full multi-agent review pipeline through the compiled graph."""
+    final = await review_graph.ainvoke(initial_state(code, language, file_path))
     return {
         "issues": final["consolidated"],
         "summary": final["summary"],
+        "agent_errors": final.get("agent_errors") or [],
     }
 
 
-async def run_code_review_stream(code: str, language: str = "python", file_path: str = "") -> AsyncIterator[dict]:
-    """Stream review results as each agent completes."""
-    import asyncio
-    
-    initial_state = ReviewState(
-        code=code,
-        language=language,
-        file_path=file_path,
-        bug_issues=[],
-        security_issues=[],
-        antipattern_issues=[],
-        test_issues=[],
-        consolidated=[],
-        summary="",
-    )
-    
-    # Run agents with yield after each
-    bug_result = await bug_detection_agent(initial_state)
-    yield {"type": "agent_complete", "agent": "bug_detection", "issues": bug_result["bug_issues"]}
-    
-    security_result = await security_agent(initial_state)
-    yield {"type": "agent_complete", "agent": "security", "issues": security_result["security_issues"]}
-    
-    antipattern_result = await antipattern_agent(initial_state)
-    yield {"type": "agent_complete", "agent": "antipattern", "issues": antipattern_result["antipattern_issues"]}
-    
-    test_result = await test_agent(initial_state)
-    yield {"type": "agent_complete", "agent": "test", "issues": test_result["test_issues"]}
-    
-    merged = {
-        **initial_state,
-        "bug_issues": bug_result["bug_issues"],
-        "security_issues": security_result["security_issues"],
-        "antipattern_issues": antipattern_result["antipattern_issues"],
-        "test_issues": test_result["test_issues"],
+async def run_code_review_stream(
+    code: str, language: str = "python", file_path: str = ""
+) -> AsyncIterator[dict]:
+    """Stream each agent's findings as it finishes, then the consolidated set.
+
+    Agents run concurrently and are emitted in completion order, so a slow
+    agent does not hold back results that are already available.
+    """
+    state = initial_state(code, language, file_path)
+
+    tasks = {
+        asyncio.create_task(run_agent(spec, state)): spec for spec in AGENT_SPECS
     }
-    
-    final = await consolidate_results(merged)
-    yield {"type": "consolidated", "issues": final["consolidated"], "summary": final["summary"]}
+    collected: dict[str, Any] = {"agent_errors": []}
+
+    try:
+        for completed in asyncio.as_completed(tasks.keys()):
+            update = await completed
+            collected["agent_errors"].extend(update.get("agent_errors") or [])
+
+            state_key = next(key for key in update if key != "agent_errors")
+            spec = AGENT_BY_NAME[
+                next(s.name for s in AGENT_SPECS if s.state_key == state_key)
+            ]
+            issues = update[state_key] or []
+            collected[state_key] = issues
+
+            yield {
+                "type": "agent_complete",
+                "agent": spec.name,
+                "category": spec.category,
+                "issues": issues,
+            }
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+
+    merged = {**state, **collected}
+    final = await consolidate_results(merged)  # type: ignore[arg-type]
+    yield {
+        "type": "consolidated",
+        "issues": final["consolidated"],
+        "summary": final["summary"],
+        "agent_errors": collected["agent_errors"],
+    }

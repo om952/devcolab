@@ -20,6 +20,7 @@ model User {
   participants    SessionParticipant[]
   comments        Comment[]
   cursors         CursorPresence[]
+  aiReviewRuns    AIReviewRun[]  @relation("AIReviewTrigger")
 
   @@map("users")
 }
@@ -40,13 +41,16 @@ model Session {
   createdAt     DateTime      @default(now()) @map("created_at")
   updatedAt     DateTime      @updatedAt @map("updated_at")
 
-  creator      User                 @relation("SessionCreator", fields: [createdById], references: [id])
-  participants SessionParticipant[]
-  comments     Comment[]
-  cursors      CursorPresence[]
-  codeFiles    CodeFile[]
-  aiReviews    AIReview[]
+  creator       User                 @relation("SessionCreator", fields: [createdById], references: [id], onDelete: Cascade)
+  participants  SessionParticipant[]
+  comments      Comment[]
+  cursors       CursorPresence[]
+  codeFiles     CodeFile[]
+  aiReviews     AIReview[]
+  aiReviewRuns  AIReviewRun[]
 
+  @@index([createdById])
+  @@index([updatedAt])
   @@map("sessions")
 }
 
@@ -79,8 +83,9 @@ model CodeFile {
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
-  session  Session   @relation(fields: [sessionId], references: [id], onDelete: Cascade)
-  comments Comment[]
+  session      Session       @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  comments     Comment[]
+  aiReviewRuns AIReviewRun[]
 
   @@unique([sessionId, filePath])
   @@map("code_files")
@@ -96,6 +101,7 @@ model Comment {
   content      String
   lineStart    Int?            @map("line_start")
   lineEnd      Int?            @map("line_end")
+  filePath     String?         @map("file_path")
   parentId     String?         @map("parent_id")
   createdAt    DateTime        @default(now()) @map("created_at")
   updatedAt    DateTime        @updatedAt @map("updated_at")
@@ -106,6 +112,9 @@ model Comment {
   parent   Comment?  @relation("CommentReplies", fields: [parentId], references: [id])
   replies  Comment[] @relation("CommentReplies")
 
+  @@index([sessionId, createdAt])
+  @@index([codeFileId])
+  @@index([parentId])
   @@map("comments")
 }
 
@@ -139,12 +148,18 @@ model CursorPresence {
   @@map("cursor_presence")
 }
 
+/// One row per agent per review run. `result` holds that agent's raw findings
+/// as JSON so a run can be inspected after the fact without re-running the LLM.
 model AIReview {
   id        String   @id @default(uuid())
   sessionId String   @map("session_id")
+  runId     String?  @map("run_id")
   agentType AgentType @map("agent_type")
   status    AIReviewStatus @default(pending)
   result    String?
+  issueCount Int     @default(0) @map("issue_count")
+  error     String?
+  durationMs Int?    @map("duration_ms")
   filePath  String?  @map("file_path")
   lineStart Int?     @map("line_start")
   lineEnd   Int?     @map("line_end")
@@ -152,9 +167,47 @@ model AIReview {
   createdAt DateTime @default(now()) @map("created_at")
   completedAt DateTime? @map("completed_at")
 
-  session Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  session Session      @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  run     AIReviewRun? @relation(fields: [runId], references: [id], onDelete: Cascade)
 
+  @@index([sessionId])
+  @@index([runId])
   @@map("ai_reviews")
+}
+
+/// A single end-to-end review request. Groups the four per-agent AIReview rows
+/// and carries the job lifecycle so a crashed or slow run is observable and
+/// recoverable rather than silently lost.
+model AIReviewRun {
+  id            String            @id @default(uuid())
+  sessionId     String            @map("session_id")
+  codeFileId    String?           @map("code_file_id")
+  triggeredById String            @map("triggered_by_id")
+  status        AIReviewRunStatus @default(pending)
+  engine        String?
+  summary       String?
+  totalIssues   Int               @default(0) @map("total_issues")
+  degraded      Boolean           @default(false)
+  error         String?
+  createdAt     DateTime          @default(now()) @map("created_at")
+  startedAt     DateTime?         @map("started_at")
+  completedAt   DateTime?         @map("completed_at")
+
+  session     Session    @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  codeFile    CodeFile?  @relation(fields: [codeFileId], references: [id], onDelete: Cascade)
+  triggeredBy User       @relation("AIReviewTrigger", fields: [triggeredById], references: [id], onDelete: Cascade)
+  agentRuns   AIReview[]
+
+  @@index([sessionId, createdAt])
+  @@index([status])
+  @@map("ai_review_runs")
+}
+
+enum AIReviewRunStatus {
+  pending
+  running
+  completed
+  failed
 }
 
 enum AgentType {

@@ -1,160 +1,132 @@
 import { Router } from "express";
+import { z } from "zod";
 import { prisma } from "@devcolab/database";
-import { authenticate, AuthRequest } from "../lib/middleware";
+import { authenticate, authorize, AuthRequest } from "../lib/middleware";
+import { aiReviewLimiter } from "../lib/rate-limit";
+import { enqueueReview } from "../services/ai-review-runner";
+import logger from "../lib/logger";
 
+// Mounted at /api/sessions/:sessionId/ai-review — paths here are relative to
+// that prefix, so they must not repeat it.
 const router = Router({ mergeParams: true });
 
-function generateMockReview(code: string, language: string) {
-  const lines = code.split("\n");
-  const issues = [];
+const triggerSchema = z.object({
+  fileId: z.string().uuid(),
+});
 
-  // Check for common patterns
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
+const listQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(100).default(20),
+  cursor: z.string().uuid().optional(),
+});
 
-    // Check for console.log
-    if (line.includes("console.log") || line.includes("print(")) {
-      issues.push({
-        category: "anti_pattern",
-        message: "Debug logging found in production code",
-        suggestion: "Remove console.log statements before committing. Use a proper logging library like Winston or Pino.",
-        line_start: i + 1,
-        line_end: i + 1,
-      });
+/** Trigger a review. Returns 202 immediately; progress arrives over Socket.IO. */
+router.post(
+  "/",
+  authenticate,
+  aiReviewLimiter,
+  authorize("author", "reviewer", "ai_reviewer"),
+  async (req: AuthRequest, res) => {
+    const parsed = triggerSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "fileId must be a valid uuid" });
+      return;
     }
 
-    // Check for TODO/FIXME
-    if (line.includes("TODO") || line.includes("FIXME") || line.includes("HACK")) {
-      issues.push({
-        category: "bug",
-        message: "Incomplete implementation found",
-        suggestion: "Address TODO/FIXME comments before merging. Create tickets for unresolved items.",
-        line_start: i + 1,
-        line_end: i + 1,
-      });
-    }
+    const sessionId = req.params.sessionId;
+    const { fileId } = parsed.data;
 
-    // Check for long lines
-    if (line.length > 100) {
-      issues.push({
-        category: "anti_pattern",
-        message: "Line exceeds 100 characters",
-        suggestion: "Break long lines into multiple lines for better readability.",
-        line_start: i + 1,
-        line_end: i + 1,
-      });
-    }
-
-    // Check for empty catch blocks
-    if (line.includes("catch") && (lines[i + 1]?.trim() === "}" || lines[i + 1]?.trim() === "")) {
-      issues.push({
-        category: "bug",
-        message: "Empty catch block suppresses errors",
-        suggestion: "Handle errors properly in catch blocks. Log the error or re-throw if appropriate.",
-        line_start: i + 1,
-        line_end: i + 1,
-      });
-    }
-
-    // Check for hardcoded secrets
-    if (line.match(/password\s*[=:]\s*["'][^"']+["']/i) || line.match(/api[_-]?key\s*[=:]\s*["'][^"']+["']/i)) {
-      issues.push({
-        category: "security",
-        message: "Potential hardcoded secret detected",
-        suggestion: "Use environment variables or a secrets manager. Never hardcode credentials in source code.",
-        line_start: i + 1,
-        line_end: i + 1,
-      });
-    }
-  }
-
-  // Add test suggestion if no tests found
-  if (!code.includes("test") && !code.includes("describe") && !code.includes("it(")) {
-    issues.push({
-      category: "test",
-      message: "No tests found for this code",
-      suggestion: `Add unit tests for ${language} functions. Consider using Jest, Vitest, or the language's standard testing framework.`,
-      line_start: 1,
-      line_end: Math.min(lines.length, 5),
+    const file = await prisma.codeFile.findUnique({
+      where: { id: fileId },
+      select: { id: true, sessionId: true },
     });
+    if (!file || file.sessionId !== sessionId) {
+      res.status(404).json({ error: "File not found" });
+      return;
+    }
+
+    try {
+      const { run, alreadyRunning } = await enqueueReview({
+        sessionId,
+        fileId,
+        userId: req.user!.userId,
+        io: req.app.get("io") ?? null,
+      });
+
+      res.status(202).json({
+        runId: run.id,
+        status: run.status,
+        alreadyRunning,
+        message: alreadyRunning
+          ? "A review is already in progress for this file"
+          : "Review queued — results stream over the session socket",
+      });
+    } catch (err) {
+      logger.error({ err, sessionId, fileId }, "Failed to enqueue AI review");
+      res.status(500).json({ error: "Could not start review" });
+    }
   }
+);
 
-  return {
-    issues,
-    summary: `Found ${issues.length} issues: ${issues.filter(i => i.category === "bug").length} bugs, ${issues.filter(i => i.category === "security").length} security, ${issues.filter(i => i.category === "anti_pattern").length} anti-patterns, ${issues.filter(i => i.category === "test").length} test suggestions.`,
-  };
-}
-
-router.post("/ai-review", authenticate, async (req: AuthRequest, res) => {
-  const { fileId } = req.body;
-  const sessionId = req.params.id;
-
-  const file = await prisma.codeFile.findUnique({ where: { id: fileId } });
-  if (!file || file.sessionId !== sessionId) {
-    res.status(404).json({ error: "File not found" });
+/** List past runs for a session, newest first. */
+router.get("/", authenticate, async (req: AuthRequest, res) => {
+  const parsed = listQuerySchema.safeParse(req.query);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid pagination parameters" });
     return;
   }
 
-  const AI_SERVICE_URL = process.env.AI_SERVICE_URL || "http://localhost:8000";
+  const { limit, cursor } = parsed.data;
 
-  try {
-    let result;
-    
-    try {
-      const response = await fetch(`${AI_SERVICE_URL}/api/v1/review`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          code: file.content,
-          language: file.language || "typescript",
-          file_path: file.filePath,
-          session_id: sessionId,
-        }),
-      });
+  const runs = await prisma.aIReviewRun.findMany({
+    where: { sessionId: req.params.sessionId },
+    orderBy: { createdAt: "desc" },
+    take: limit + 1,
+    ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+    include: {
+      agentRuns: {
+        select: { agentType: true, status: true, issueCount: true, error: true, durationMs: true },
+      },
+    },
+  });
 
-      if (response.ok) {
-        result = await response.json();
-      } else {
-        throw new Error(`AI service returned ${response.status}`);
-      }
-    } catch (aiErr) {
-      // Fallback: generate mock review for demo
-      console.log("AI service unavailable, using mock review");
-      result = generateMockReview(file.content, file.language || "typescript");
-    }
+  const hasMore = runs.length > limit;
+  const page = hasMore ? runs.slice(0, limit) : runs;
 
-    // Create AI comments from the review results
-    const aiComments = await Promise.all(
-      result.issues.map((issue: any) =>
-        prisma.comment.create({
-          data: {
-            sessionId,
-            codeFileId: fileId,
-            authorId: req.user!.userId,
-            authorType: "ai",
-            category: issue.category,
-            content: `${issue.message}\n\n**Suggestion:** ${issue.suggestion}`,
-            filePath: file.filePath,
-            lineStart: issue.line_start,
-            lineEnd: issue.line_end,
-          },
-          include: { author: { select: { id: true, name: true, role: true } } },
-        })
-      )
-    );
+  res.json({
+    runs: page,
+    nextCursor: hasMore ? page[page.length - 1].id : null,
+  });
+});
 
-    // Emit new comments via Socket.IO
-    const io = req.app.get("io");
-    if (io) {
-      aiComments.forEach((comment: any) => {
-        io.to(sessionId).emit("comment:created", comment);
-      });
-    }
-
-    res.json({ success: true, issuesFound: result.issues.length, summary: result.summary });
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
+/** Poll a single run — the fallback for clients that miss socket events. */
+router.get("/:runId", authenticate, async (req: AuthRequest, res) => {
+  if (!z.string().uuid().safeParse(req.params.runId).success) {
+    res.status(400).json({ error: "Invalid runId" });
+    return;
   }
+
+  const run = await prisma.aIReviewRun.findUnique({
+    where: { id: req.params.runId },
+    include: {
+      agentRuns: {
+        select: {
+          agentType: true,
+          status: true,
+          issueCount: true,
+          error: true,
+          durationMs: true,
+          completedAt: true,
+        },
+      },
+    },
+  });
+
+  if (!run || run.sessionId !== req.params.sessionId) {
+    res.status(404).json({ error: "Review run not found" });
+    return;
+  }
+
+  res.json(run);
 });
 
 export default router;

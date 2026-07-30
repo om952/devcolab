@@ -18,7 +18,7 @@ interface Session {
 
 export default function DashboardPage() {
   const router = useRouter();
-  const { user, token, logout } = useAuth();
+  const { user, token, logout, isLoading } = useAuth();
   const [sessions, setSessions] = useState<Session[]>([]);
   const [loading, setLoading] = useState(true);
   const [showCreate, setShowCreate] = useState(false);
@@ -26,12 +26,15 @@ export default function DashboardPage() {
   const [newDesc, setNewDesc] = useState("");
 
   useEffect(() => {
+    // The auth context restores from localStorage asynchronously; redirecting
+    // before that resolves would bounce a signed-in user on every hard load.
+    if (isLoading) return;
     if (!user) {
       router.push("/login");
       return;
     }
     fetchSessions();
-  }, [user, router]);
+  }, [user, isLoading, router]);
 
   const fetchSessions = async () => {
     try {
@@ -69,6 +72,9 @@ export default function DashboardPage() {
     }
   };
 
+  if (isLoading) {
+    return <div className="p-8 text-slate-400">Loading…</div>;
+  }
   if (!user) return null;
 
   return (
