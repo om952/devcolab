@@ -77,6 +77,58 @@ class TestAgentIsolation:
         assert "timed out" in result["agent_errors"][0]["error"]
 
 
+class TestRateLimitRetry:
+    async def test_a_throttled_agent_retries_and_then_succeeds(
+        self, fake_llm, sample_code, monkeypatch
+    ):
+        monkeypatch.setattr(A, "RATE_LIMIT_BASE_DELAY_SECONDS", 0.01)
+        llm = fake_llm(rate_limit_on=["security"], rate_limit_times=1)
+
+        result = await A.run_code_review(sample_code, "python", "f.py")
+
+        assert result["agent_errors"] == [], "a recoverable throttle must not degrade the run"
+        assert llm.rate_limit_hits["security"] == 1
+        assert len(result["issues"]) == 4
+
+    async def test_retries_never_outlive_the_agent_budget(
+        self, fake_llm, sample_code, monkeypatch
+    ):
+        # Backoff longer than the remaining budget must give up rather than
+        # stall the whole review past the caller's timeout.
+        monkeypatch.setattr(A, "AGENT_TIMEOUT_SECONDS", 0.5)
+        monkeypatch.setattr(A, "RATE_LIMIT_BASE_DELAY_SECONDS", 30.0)
+        fake_llm(rate_limit_on=["security"], rate_limit_times=99)
+
+        start = time.monotonic()
+        result = await A.run_code_review(sample_code, "python", "f.py")
+        elapsed = time.monotonic() - start
+
+        assert elapsed < 5, "must not sleep past the agent budget"
+        assert len(result["agent_errors"]) == 1
+        assert len(result["issues"]) == 3
+
+    async def test_a_throttle_is_reported_in_plain_language(
+        self, fake_llm, sample_code, monkeypatch
+    ):
+        monkeypatch.setattr(A, "AGENT_TIMEOUT_SECONDS", 0.5)
+        monkeypatch.setattr(A, "RATE_LIMIT_BASE_DELAY_SECONDS", 30.0)
+        fake_llm(rate_limit_on=["security"], rate_limit_times=99)
+
+        result = await A.run_code_review(sample_code, "python", "f.py")
+
+        assert "rate limited" in result["agent_errors"][0]["error"]
+        assert "429" not in result["agent_errors"][0]["error"]
+
+    async def test_a_genuine_error_is_not_retried(self, fake_llm, sample_code, monkeypatch):
+        monkeypatch.setattr(A, "RATE_LIMIT_BASE_DELAY_SECONDS", 0.01)
+        llm = fake_llm(fail_on=["security"])
+
+        result = await A.run_code_review(sample_code, "python", "f.py")
+
+        assert llm.seen.count("security") == 1, "non-throttle failures must not retry"
+        assert "exploded" in result["agent_errors"][0]["error"]
+
+
 class TestStreaming:
     async def test_emits_one_event_per_agent_then_consolidated(self, fake_llm, sample_code):
         fake_llm()
@@ -97,6 +149,38 @@ class TestStreaming:
 
         streamed = sum(len(e["issues"]) for e in events if e["type"] == "agent_complete")
         assert len(events[-1]["issues"]) == streamed
+
+    async def test_a_failing_agent_reports_its_error_on_its_own_event(
+        self, fake_llm, sample_code
+    ):
+        # Regression: the error used to appear only in the final consolidated
+        # payload, so a failed agent streamed identically to one that ran fine
+        # and found nothing.
+        fake_llm(fail_on=["security"])
+        events = [e async for e in A.run_code_review_stream(sample_code, "python", "f.py")]
+
+        by_agent = {e["agent"]: e for e in events if e["type"] == "agent_complete"}
+        assert by_agent["security_scan"]["error"], "failed agent must carry an error"
+        assert by_agent["security_scan"]["issues"] == []
+
+    async def test_a_healthy_agent_reports_no_error(self, fake_llm, sample_code):
+        fake_llm()
+        events = [e async for e in A.run_code_review_stream(sample_code, "python", "f.py")]
+
+        assert all(
+            e["error"] is None for e in events if e["type"] == "agent_complete"
+        ), "a successful agent must not report an error"
+
+    async def test_a_timed_out_agent_reports_the_timeout_on_its_event(
+        self, fake_llm, sample_code, monkeypatch
+    ):
+        monkeypatch.setattr(A, "AGENT_TIMEOUT_SECONDS", 0.3)
+        fake_llm(hang_on=["security"])
+
+        events = [e async for e in A.run_code_review_stream(sample_code, "python", "f.py")]
+        by_agent = {e["agent"]: e for e in events if e["type"] == "agent_complete"}
+
+        assert "timed out" in by_agent["security_scan"]["error"]
 
     async def test_faster_agents_are_emitted_first(self, fake_llm, sample_code, monkeypatch):
         # Completion order, not declaration order, should drive the stream.

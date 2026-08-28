@@ -48,6 +48,10 @@ class TestHealth:
     def test_readiness_fails_when_no_provider_is_reachable(self, client, monkeypatch):
         get_settings.cache_clear()
         A._readiness_cache = None
+        # Every provider must be knocked out, otherwise the check legitimately
+        # reports ready via whichever one is still configured.
+        monkeypatch.setenv("GOOGLE_API_KEY", "")
+        monkeypatch.setenv("GEMINI_API_KEY", "")
         monkeypatch.setenv("GROQ_API_KEY", "")
         monkeypatch.setenv("OLLAMA_HOST", "http://127.0.0.1:59999")
 

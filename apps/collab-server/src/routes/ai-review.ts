@@ -3,8 +3,14 @@ import { z } from "zod";
 import { prisma } from "@devcolab/database";
 import { authenticate, authorize, AuthRequest } from "../lib/middleware";
 import { aiReviewLimiter } from "../lib/rate-limit";
-import { enqueueReview } from "../services/ai-review-runner";
+import { enqueueReview, enqueueReviewBatch } from "../services/ai-review-runner";
 import logger from "../lib/logger";
+
+/**
+ * Ceiling on a single folder review. Every file costs four LLM calls, so an
+ * unbounded batch would exhaust a provider's quota in one click.
+ */
+const MAX_BATCH_REVIEW_FILES = 25;
 
 // Mounted at /api/sessions/:sessionId/ai-review — paths here are relative to
 // that prefix, so they must not repeat it.
@@ -12,6 +18,11 @@ const router = Router({ mergeParams: true });
 
 const triggerSchema = z.object({
   fileId: z.string().uuid(),
+});
+
+const batchTriggerSchema = z.object({
+  // Omitted means "every file in the session".
+  fileIds: z.array(z.string().uuid()).min(1).optional(),
 });
 
 const listQuerySchema = z.object({
@@ -63,6 +74,76 @@ router.post(
     } catch (err) {
       logger.error({ err, sessionId, fileId }, "Failed to enqueue AI review");
       res.status(500).json({ error: "Could not start review" });
+    }
+  }
+);
+
+/**
+ * Trigger a review across many files — the folder-review path.
+ *
+ * Deliberately one request rather than a client-side loop: the per-user rate
+ * limit is 5/min, so looping would stall after five files, and batching keeps
+ * scheduling and the file-count ceiling on the server where they are enforced.
+ *
+ * Omit `fileIds` to review every file in the session.
+ */
+router.post(
+  "/batch",
+  authenticate,
+  aiReviewLimiter,
+  authorize("author", "reviewer", "ai_reviewer"),
+  async (req: AuthRequest, res) => {
+    const parsed = batchTriggerSchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.issues[0]?.message ?? "Invalid request" });
+      return;
+    }
+
+    const sessionId = req.params.sessionId;
+
+    const sessionFiles = await prisma.codeFile.findMany({
+      where: { sessionId },
+      select: { id: true, filePath: true },
+      orderBy: { filePath: "asc" },
+    });
+
+    if (sessionFiles.length === 0) {
+      res.status(400).json({ error: "This session has no files to review" });
+      return;
+    }
+
+    const known = new Map(sessionFiles.map((f) => [f.id, f.filePath]));
+    const requested = parsed.data.fileIds ?? sessionFiles.map((f) => f.id);
+
+    // Ignore ids belonging to another session rather than reviewing them.
+    const valid = requested.filter((id) => known.has(id));
+    if (valid.length === 0) {
+      res.status(404).json({ error: "None of those files belong to this session" });
+      return;
+    }
+
+    const selected = valid.slice(0, MAX_BATCH_REVIEW_FILES);
+    const overflow = valid.slice(MAX_BATCH_REVIEW_FILES);
+
+    try {
+      const result = await enqueueReviewBatch({
+        sessionId,
+        fileIds: selected,
+        userId: req.user!.userId,
+        io: req.app.get("io") ?? null,
+      });
+
+      res.status(202).json({
+        runs: result.runs.map((run) => ({ ...run, filePath: known.get(run.fileId) })),
+        queued: result.queued,
+        attached: result.attached,
+        skipped: overflow.map((id) => ({ fileId: id, filePath: known.get(id), reason: "over the per-batch limit" })),
+        limit: MAX_BATCH_REVIEW_FILES,
+        message: `Queued ${result.queued} file(s) for review — progress streams over the session socket`,
+      });
+    } catch (err) {
+      logger.error({ err, sessionId }, "Failed to enqueue batch AI review");
+      res.status(500).json({ error: "Could not start batch review" });
     }
   }
 );

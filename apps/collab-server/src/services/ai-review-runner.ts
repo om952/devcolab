@@ -36,6 +36,8 @@ interface SseEvent {
   summary?: string;
   message?: string;
   code?: string;
+  /** Set on `agent_complete` when that specific agent failed or timed out. */
+  error?: string | null;
   agent_errors?: { agent: string; error: string }[];
 }
 
@@ -212,6 +214,12 @@ async function runViaAiService(params: {
         .filter((issue): issue is ReviewIssue => issue !== null);
 
       const now = Date.now();
+      // An agent that failed inside ai-service must be recorded as failed, not
+      // as "completed with no findings" — those look identical to a reviewer
+      // otherwise, and silently understate what was actually checked.
+      const agentError = event.error ?? undefined;
+      if (agentError) degraded = true;
+
       await persistAgentResult({
         runId,
         sessionId,
@@ -222,6 +230,7 @@ async function runViaAiService(params: {
         aiUserId,
         durationMs: now - lastAt,
         io,
+        error: agentError,
       });
       lastAt = now;
 
@@ -231,7 +240,9 @@ async function runViaAiService(params: {
 
     if (event.type === "consolidated") {
       summary = event.summary ?? "";
-      degraded = (event.agent_errors?.length ?? 0) > 0;
+      // OR rather than assign: a failure already seen on a per-agent event must
+      // not be cleared by a consolidated payload that omits it.
+      degraded = degraded || (event.agent_errors?.length ?? 0) > 0;
     }
   }
 
@@ -369,6 +380,42 @@ export async function processRun(runId: string, io: Server | null): Promise<void
   }
 }
 
+/**
+ * Bounded scheduler for the no-Redis path.
+ *
+ * BullMQ caps concurrency at AI_REVIEW_CONCURRENCY, but the in-process
+ * fallback used to hand every run straight to setImmediate. Reviewing a folder
+ * that way would start one run per file at once — four LLM calls each — and
+ * trip provider rate limits immediately. Queue locally instead, draining at the
+ * same concurrency the worker uses.
+ */
+const pendingInProcess: Array<{ runId: string; io: Server | null }> = [];
+let activeInProcess = 0;
+
+function pumpInProcess(): void {
+  while (activeInProcess < env.AI_REVIEW_CONCURRENCY && pendingInProcess.length > 0) {
+    const next = pendingInProcess.shift()!;
+    activeInProcess += 1;
+
+    processRun(next.runId, next.io)
+      .catch((err) => logger.error({ err, runId: next.runId }, "Unhandled review run error"))
+      .finally(() => {
+        activeInProcess -= 1;
+        pumpInProcess();
+      });
+  }
+}
+
+function scheduleInProcess(runId: string, io: Server | null): void {
+  pendingInProcess.push({ runId, io });
+  setImmediate(pumpInProcess);
+}
+
+/** Exposed for tests and logging: how much in-process work is outstanding. */
+export function inProcessBacklog(): { active: number; queued: number } {
+  return { active: activeInProcess, queued: pendingInProcess.length };
+}
+
 export interface EnqueueResult {
   run: { id: string; status: string };
   alreadyRunning: boolean;
@@ -423,14 +470,44 @@ export async function enqueueReview(params: {
   }
 
   if (!queued) {
-    setImmediate(() => {
-      processRun(run.id, io).catch((err) =>
-        logger.error({ err, runId: run.id }, "Unhandled review run error")
-      );
-    });
+    scheduleInProcess(run.id, io);
   }
 
   return { run, alreadyRunning: false };
+}
+
+export interface BatchEnqueueResult {
+  runs: Array<{ runId: string; fileId: string; status: string; alreadyRunning: boolean }>;
+  queued: number;
+  attached: number;
+}
+
+/**
+ * Queue a review for several files at once — the folder-review path.
+ *
+ * Each file keeps its own AIReviewRun rather than introducing a parent job:
+ * per-file runs stay independently observable, retryable and dedupable, and
+ * reuse the queue, reconciliation sweep and per-agent rows unchanged.
+ */
+export async function enqueueReviewBatch(params: {
+  sessionId: string;
+  fileIds: string[];
+  userId: string;
+  io: Server | null;
+}): Promise<BatchEnqueueResult> {
+  const { sessionId, fileIds, userId, io } = params;
+  const runs: BatchEnqueueResult["runs"] = [];
+
+  for (const fileId of fileIds) {
+    const { run, alreadyRunning } = await enqueueReview({ sessionId, fileId, userId, io });
+    runs.push({ runId: run.id, fileId, status: run.status, alreadyRunning });
+  }
+
+  return {
+    runs,
+    queued: runs.filter((r) => !r.alreadyRunning).length,
+    attached: runs.filter((r) => r.alreadyRunning).length,
+  };
 }
 
 /**

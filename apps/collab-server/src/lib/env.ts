@@ -47,7 +47,10 @@ const envSchema = z
     TRUST_PROXY: z.coerce.number().int().min(0).default(0),
     JSON_BODY_LIMIT: z.string().default("2mb"),
     MAX_CODE_FILE_BYTES: z.coerce.number().default(512 * 1024),
-    AI_REVIEW_TIMEOUT_MS: z.coerce.number().default(60_000),
+    // Must exceed ai-service's per-agent timeout (AGENT_TIMEOUT_SECONDS,
+    // default 90s). Set below it and this side aborts the stream mid-run and
+    // falls back to the heuristic scanner while the agents are still working.
+    AI_REVIEW_TIMEOUT_MS: z.coerce.number().default(180_000),
     // How many reviews one instance runs at once, and how many times a failed
     // job is retried before it is left as failed.
     AI_REVIEW_CONCURRENCY: z.coerce.number().int().min(1).max(50).default(3),

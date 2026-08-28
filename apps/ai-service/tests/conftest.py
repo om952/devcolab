@@ -18,12 +18,25 @@ class FakeLLM:
     specific agents, so agent isolation can be tested without a network call.
     """
 
-    def __init__(self, delay: float = 0.0, fail_on=None, hang_on=None, responses=None):
+    def __init__(
+        self,
+        delay: float = 0.0,
+        fail_on=None,
+        hang_on=None,
+        responses=None,
+        rate_limit_on=None,
+        rate_limit_times: int = 1,
+    ):
         self.seen: list[str] = []
         self.delay = delay
         self.fail_on = set(fail_on or [])
         self.hang_on = set(hang_on or [])
         self.responses = responses or {}
+        # Throttle these agents for the first `rate_limit_times` calls, then
+        # answer normally — the shape of a real provider rate limit.
+        self.rate_limit_on = set(rate_limit_on or [])
+        self.rate_limit_times = rate_limit_times
+        self.rate_limit_hits: dict[str, int] = {}
 
     @staticmethod
     def _kind(prompt: str) -> str:
@@ -43,6 +56,14 @@ class FakeLLM:
             await asyncio.sleep(3600)
         if self.delay:
             await asyncio.sleep(self.delay)
+        if kind in self.rate_limit_on:
+            hits = self.rate_limit_hits.get(kind, 0)
+            if hits < self.rate_limit_times:
+                self.rate_limit_hits[kind] = hits + 1
+                raise RuntimeError(
+                    "Error calling model (RESOURCE_EXHAUSTED): 429 RESOURCE_EXHAUSTED quota exceeded"
+                )
+
         if kind in self.fail_on:
             raise RuntimeError(f"{kind} provider exploded")
         if kind in self.responses:

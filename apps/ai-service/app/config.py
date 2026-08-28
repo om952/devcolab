@@ -7,7 +7,18 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     """Validated environment variables for ai-service."""
 
-    # LLM provider keys
+    # LLM provider keys. Providers are tried in priority order at runtime:
+    # Gemini -> Groq -> Ollama. See app.services.agents.get_llm.
+    google_api_key: str = ""
+    gemini_model: str = "gemini-3.6-flash"
+
+    # Per-agent wall clock budget, in seconds. Reasoning-capable models emit
+    # thinking tokens before answering and are markedly slower than the small
+    # instruct models this pipeline was first tuned against, so this needs
+    # headroom. Must stay below collab-server's AI_REVIEW_TIMEOUT_MS, or that
+    # side aborts the stream and falls back to heuristics while agents are
+    # still working.
+    agent_timeout_seconds: float = 90.0
     groq_api_key: str = ""
     ollama_host: str = "http://localhost:11434"
     huggingface_api_token: str = ""

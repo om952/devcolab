@@ -25,6 +25,13 @@ from app.config import get_settings
 logger = structlog.get_logger(service="ai-service", component="agents")
 
 try:
+    from langchain_google_genai import ChatGoogleGenerativeAI
+
+    GEMINI_AVAILABLE = True
+except ImportError:  # pragma: no cover - depends on install extras
+    GEMINI_AVAILABLE = False
+
+try:
     from langchain_groq import ChatGroq
 
     GROQ_AVAILABLE = True
@@ -39,7 +46,7 @@ except ImportError:  # pragma: no cover - depends on install extras
     OLLAMA_AVAILABLE = False
 
 
-AGENT_TIMEOUT_SECONDS = 45.0
+AGENT_TIMEOUT_SECONDS = get_settings().agent_timeout_seconds
 """Per-agent wall clock budget. Exceeding it degrades that agent, not the run."""
 
 MAX_CODE_CHARS = 60_000
@@ -48,6 +55,21 @@ MAX_CODE_CHARS = 60_000
 VALID_SEVERITIES = ("critical", "high", "medium", "low", "info")
 SEVERITY_ORDER = {name: index for index, name in enumerate(VALID_SEVERITIES)}
 
+RATE_LIMIT_MARKERS = ("429", "resource_exhausted", "rate limit", "ratelimit", "quota")
+"""Substrings identifying a provider throttle rather than a real failure."""
+
+RATE_LIMIT_BASE_DELAY_SECONDS = 5.0
+
+
+def is_rate_limited(exc: BaseException) -> bool:
+    """Whether an exception is the provider throttling us.
+
+    Reviewing a folder fans out four calls per file, so brushing against a
+    per-minute limit is routine and worth retrying — unlike a genuine error.
+    """
+    text = str(exc).lower()
+    return any(marker in text for marker in RATE_LIMIT_MARKERS)
+
 
 class NoLLMConfiguredError(RuntimeError):
     """Raised when neither Groq nor Ollama is usable."""
@@ -55,8 +77,21 @@ class NoLLMConfiguredError(RuntimeError):
 
 @lru_cache(maxsize=1)
 def get_llm():
-    """Build the LLM client once and reuse it across agents and requests."""
+    """Build the LLM client once and reuse it across agents and requests.
+
+    Providers are tried in priority order — Gemini, then Groq, then a local
+    Ollama — so configuring a key is the only step needed to switch.
+    """
     settings = get_settings()
+
+    if settings.google_api_key and GEMINI_AVAILABLE:
+        logger.info("llm_selected", provider="gemini", model=settings.gemini_model)
+        return ChatGoogleGenerativeAI(
+            google_api_key=settings.google_api_key,
+            model=settings.gemini_model,
+            temperature=0.1,
+            max_retries=2,
+        )
 
     if settings.groq_api_key and GROQ_AVAILABLE:
         logger.info("llm_selected", provider="groq", model="llama-3.1-8b-instant")
@@ -76,7 +111,8 @@ def get_llm():
         )
 
     raise NoLLMConfiguredError(
-        "No LLM available. Set GROQ_API_KEY or run Ollama and install langchain-ollama."
+        "No LLM available. Set GOOGLE_API_KEY or GROQ_API_KEY, or run Ollama "
+        "and install langchain-ollama."
     )
 
 
@@ -102,7 +138,9 @@ async def check_llm_ready() -> tuple[bool, str]:
     settings = get_settings()
     ready, detail = False, "no provider configured"
 
-    if settings.groq_api_key and GROQ_AVAILABLE:
+    if settings.google_api_key and GEMINI_AVAILABLE:
+        ready, detail = True, f"gemini api key configured ({settings.gemini_model})"
+    elif settings.groq_api_key and GROQ_AVAILABLE:
         ready, detail = True, "groq api key configured"
     elif OLLAMA_AVAILABLE:
         try:
@@ -247,6 +285,37 @@ AGENT_BY_NAME = {spec.name: spec for spec in AGENT_SPECS}
 _FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL)
 
 
+def response_text(response: Any) -> str:
+    """Flatten an LLM response into plain text.
+
+    Providers disagree on the shape of `.content`: Groq and Ollama return a
+    string, while Gemini returns a list of content blocks
+    (``[{"type": "text", "text": ...}]``). Normalising here keeps the parsing
+    below provider-agnostic instead of branching per vendor.
+    """
+    content = getattr(response, "content", None)
+
+    if isinstance(content, str):
+        return content
+
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict) and isinstance(block.get("text"), str):
+                parts.append(block["text"])
+        if parts:
+            return "".join(parts)
+
+    # langchain-core exposes a flattened `.text` on newer versions; it is a
+    # property on some releases and a method on others.
+    text = getattr(response, "text", None)
+    if callable(text):
+        text = text()
+    return text if isinstance(text, str) else ""
+
+
 def parse_json_response(text: str) -> list[dict]:
     """Extract a JSON array of issues from a model response.
 
@@ -339,14 +408,40 @@ async def run_agent(spec: AgentSpec, state: ReviewState) -> dict:
     max_line = code.count("\n") + 1
     log = logger.bind(agent=spec.name, file_path=state.get("file_path") or None)
 
+    loop = asyncio.get_event_loop()
+    deadline = loop.time() + AGENT_TIMEOUT_SECONDS
+
     try:
         llm = get_llm()
         prompt = spec.prompt.format(language=state["language"], code=code)
-        response = await asyncio.wait_for(
-            llm.ainvoke([HumanMessage(content=prompt)]),
-            timeout=AGENT_TIMEOUT_SECONDS,
-        )
-        raw_issues = parse_json_response(getattr(response, "content", "") or "")
+
+        attempt = 0
+        while True:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise TimeoutError
+
+            try:
+                response = await asyncio.wait_for(
+                    llm.ainvoke([HumanMessage(content=prompt)]), timeout=remaining
+                )
+                break
+            except Exception as exc:  # noqa: BLE001 - retried or re-raised below
+                # Retry throttling within the agent's existing budget rather
+                # than extending it, so a slow provider cannot stall the run
+                # past the caller's timeout.
+                backoff = RATE_LIMIT_BASE_DELAY_SECONDS * (2**attempt)
+                if (
+                    not is_rate_limited(exc)
+                    or deadline - loop.time() <= backoff
+                ):
+                    raise
+
+                attempt += 1
+                log.warning("agent_rate_limited", attempt=attempt, retry_in_seconds=backoff)
+                await asyncio.sleep(backoff)
+
+        raw_issues = parse_json_response(response_text(response))
         issues = [
             normalized
             for item in raw_issues
@@ -365,7 +460,14 @@ async def run_agent(spec: AgentSpec, state: ReviewState) -> dict:
         }
     except Exception as exc:  # noqa: BLE001 - one agent must not sink the run
         log.error("agent_failed", error=str(exc), error_type=type(exc).__name__)
-        return {spec.state_key: [], "agent_errors": [{"agent": spec.name, "error": str(exc)}]}
+        # Provider throttling is the common failure when reviewing many files;
+        # a raw 429 payload tells a reviewer nothing actionable.
+        message = (
+            "rate limited by the LLM provider — retry in a minute or reduce AI_REVIEW_CONCURRENCY"
+            if is_rate_limited(exc)
+            else str(exc)
+        )
+        return {spec.state_key: [], "agent_errors": [{"agent": spec.name, "error": message}]}
 
 
 def _make_node(spec: AgentSpec) -> Callable[[ReviewState], Any]:
@@ -468,7 +570,8 @@ async def run_code_review_stream(
     try:
         for completed in asyncio.as_completed(tasks.keys()):
             update = await completed
-            collected["agent_errors"].extend(update.get("agent_errors") or [])
+            agent_errors = update.get("agent_errors") or []
+            collected["agent_errors"].extend(agent_errors)
 
             state_key = next(key for key in update if key != "agent_errors")
             spec = AGENT_BY_NAME[
@@ -477,11 +580,15 @@ async def run_code_review_stream(
             issues = update[state_key] or []
             collected[state_key] = issues
 
+            # Carry this agent's failure on its own event. Reporting it only in
+            # the final consolidated payload made a failed agent arrive looking
+            # exactly like one that ran fine and found nothing.
             yield {
                 "type": "agent_complete",
                 "agent": spec.name,
                 "category": spec.category,
                 "issues": issues,
+                "error": agent_errors[0]["error"] if agent_errors else None,
             }
     finally:
         for task in tasks:
