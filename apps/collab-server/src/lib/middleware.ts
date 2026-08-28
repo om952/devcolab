@@ -35,3 +35,23 @@ export function authorize(...roles: string[]) {
     next();
   };
 }
+
+/**
+ * Wrap an async route handler so a rejected promise reaches Express.
+ *
+ * Express 4 does not await handlers, so a rejection from an `async` route is
+ * never caught: the handler stops, no response is ever sent, and the client
+ * hangs until it gives up. That surfaced as a 15s hang on GET /api/sessions/:id
+ * when a concurrent participant insert lost a unique-constraint race.
+ *
+ * Passing the error to next() hands it to the global error handler, which
+ * returns 500 and logs it. Remove when upgrading to Express 5, which awaits
+ * handlers natively.
+ */
+export function asyncHandler<R extends Request = AuthRequest>(
+  handler: (req: R, res: Response, next: NextFunction) => Promise<unknown>
+) {
+  return (req: Request, res: Response, next: NextFunction) => {
+    Promise.resolve(handler(req as R, res, next)).catch(next);
+  };
+}

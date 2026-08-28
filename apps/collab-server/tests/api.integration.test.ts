@@ -467,4 +467,36 @@ suite("REST API integration", () => {
       expect(second.status).toBe(202);
     });
   });
+
+  describe("concurrent enrolment", () => {
+    it("survives simultaneous opens of the same session by the same user", async () => {
+      const owner = await register("author");
+      const guest = await register("reviewer");
+
+      const session = await request(app)
+        .post("/api/sessions")
+        .set({ Authorization: `Bearer ${owner.token}` })
+        .send({ title: "Concurrent open" });
+
+      // Opening a session enrols the caller. A real browser does this over
+      // HTTP and over the socket at the same time, so both insert the same
+      // (session, user) pair concurrently. Losing that race threw an
+      // unhandled P2002, and because Express 4 does not await async handlers
+      // the request was left hanging with no response at all.
+      const opens = await Promise.all(
+        Array.from({ length: 8 }, () =>
+          request(app)
+            .get(`/api/sessions/${session.body.id}`)
+            .set({ Authorization: `Bearer ${guest.token}` })
+        )
+      );
+
+      expect(opens.map((r) => r.status)).toEqual(Array(8).fill(200));
+
+      const rows = await prisma.sessionParticipant.count({
+        where: { sessionId: session.body.id, userId: guest.user.id },
+      });
+      expect(rows).toBe(1);
+    });
+  });
 });

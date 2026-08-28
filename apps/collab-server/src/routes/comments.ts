@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { z } from "zod";
 import { prisma } from "@devcolab/database";
-import { authenticate, AuthRequest } from "../lib/middleware";
+import { authenticate, asyncHandler, AuthRequest } from "../lib/middleware";
 
 const router = Router({ mergeParams: true });
 
@@ -32,13 +32,17 @@ router.post("/", authenticate, async (req: AuthRequest, res) => {
   }
 });
 
-router.get("/", authenticate, async (req: AuthRequest, res) => {
+router.get(
+  "/",
+  authenticate,
+  asyncHandler(async (req: AuthRequest, res) => {
   const comments = await prisma.comment.findMany({
     where: { sessionId: req.params.sessionId },
     include: { author: { select: { id: true, name: true, role: true } } },
     orderBy: { createdAt: "desc" },
   });
   res.json(comments);
-});
+  })
+);
 
 export default router;

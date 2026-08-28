@@ -1,7 +1,8 @@
 import { Router } from "express";
 import { z } from "zod";
 import { prisma } from "@devcolab/database";
-import { authenticate, AuthRequest } from "../lib/middleware";
+import { authenticate, asyncHandler, AuthRequest } from "../lib/middleware";
+import { enrollParticipant } from "../lib/participants";
 
 const router = Router();
 
@@ -53,7 +54,10 @@ router.post("/", authenticate, async (req: AuthRequest, res) => {
  * remain reachable by anyone holding the (unguessable) id, which is how a
  * teammate joins one — see GET /:id.
  */
-router.get("/", authenticate, async (req: AuthRequest, res) => {
+router.get(
+  "/",
+  authenticate,
+  asyncHandler(async (req: AuthRequest, res) => {
   const userId = req.user!.userId;
 
   const sessions = await prisma.session.findMany({
@@ -65,7 +69,8 @@ router.get("/", authenticate, async (req: AuthRequest, res) => {
   });
 
   res.json(sessions);
-});
+  })
+);
 
 /**
  * Open a session by id.
@@ -74,7 +79,10 @@ router.get("/", authenticate, async (req: AuthRequest, res) => {
  * doing so enrols them as a participant so it appears on their dashboard from
  * then on. Ids are UUIDs, so they are not discoverable by guessing.
  */
-router.get("/:id", authenticate, async (req: AuthRequest, res) => {
+router.get(
+  "/:id",
+  authenticate,
+  asyncHandler(async (req: AuthRequest, res) => {
   const session = await prisma.session.findUnique({
     where: { id: req.params.id },
     include: {
@@ -92,14 +100,12 @@ router.get("/:id", authenticate, async (req: AuthRequest, res) => {
     return;
   }
 
-  await prisma.sessionParticipant.upsert({
-    where: { sessionId_userId: { sessionId: session.id, userId: req.user!.userId } },
-    update: {},
-    create: { sessionId: session.id, userId: req.user!.userId },
-  });
+  // Races with the browser's socket `session:join` on every page load.
+  await enrollParticipant(session.id, req.user!.userId);
 
   res.json(session);
-});
+  })
+);
 
 /** Only the creator may modify or delete a session. */
 async function loadOwnedSession(req: AuthRequest, res: any) {
@@ -116,7 +122,10 @@ async function loadOwnedSession(req: AuthRequest, res: any) {
   return session;
 }
 
-router.patch("/:id", authenticate, async (req: AuthRequest, res) => {
+router.patch(
+  "/:id",
+  authenticate,
+  asyncHandler(async (req: AuthRequest, res) => {
   const session = await loadOwnedSession(req, res);
   if (!session) return;
 
@@ -131,14 +140,19 @@ router.patch("/:id", authenticate, async (req: AuthRequest, res) => {
     data: parsed.data,
   });
   res.json(updated);
-});
+  })
+);
 
-router.delete("/:id", authenticate, async (req: AuthRequest, res) => {
+router.delete(
+  "/:id",
+  authenticate,
+  asyncHandler(async (req: AuthRequest, res) => {
   const session = await loadOwnedSession(req, res);
   if (!session) return;
 
   await prisma.session.delete({ where: { id: req.params.id } });
   res.status(204).send();
-});
+  })
+);
 
 export default router;

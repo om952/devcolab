@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { z } from "zod";
 import { prisma } from "@devcolab/database";
-import { authenticate, authorize, AuthRequest } from "../lib/middleware";
+import { authenticate, authorize, asyncHandler, AuthRequest } from "../lib/middleware";
 import { aiReviewLimiter } from "../lib/rate-limit";
 import { enqueueReview, enqueueReviewBatch } from "../services/ai-review-runner";
 import logger from "../lib/logger";
@@ -149,7 +149,10 @@ router.post(
 );
 
 /** List past runs for a session, newest first. */
-router.get("/", authenticate, async (req: AuthRequest, res) => {
+router.get(
+  "/",
+  authenticate,
+  asyncHandler(async (req: AuthRequest, res) => {
   const parsed = listQuerySchema.safeParse(req.query);
   if (!parsed.success) {
     res.status(400).json({ error: "Invalid pagination parameters" });
@@ -177,10 +180,14 @@ router.get("/", authenticate, async (req: AuthRequest, res) => {
     runs: page,
     nextCursor: hasMore ? page[page.length - 1].id : null,
   });
-});
+  })
+);
 
 /** Poll a single run — the fallback for clients that miss socket events. */
-router.get("/:runId", authenticate, async (req: AuthRequest, res) => {
+router.get(
+  "/:runId",
+  authenticate,
+  asyncHandler(async (req: AuthRequest, res) => {
   if (!z.string().uuid().safeParse(req.params.runId).success) {
     res.status(400).json({ error: "Invalid runId" });
     return;
@@ -208,6 +215,7 @@ router.get("/:runId", authenticate, async (req: AuthRequest, res) => {
   }
 
   res.json(run);
-});
+  })
+);
 
 export default router;

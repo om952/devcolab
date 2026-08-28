@@ -213,15 +213,35 @@ test.describe("session visibility", () => {
 });
 
 test.describe("access control", () => {
-  test("a reviewer cannot add files, an author can", async ({ page }) => {
+  test("a reviewer is not offered the upload control, and is told why", async ({ page }) => {
     await register(page, "reviewer");
     const { row } = await createSession(page, "RBAC Session");
     await row.click();
     await expect(page).toHaveURL(/\/session\//);
 
-    // The server enforces the author-only rule, so this upload must fail.
-    page.once("dialog", (d) => d.accept());
-    await addFile(page, "blocked.ts", "const a = 1;\n");
-    await expect(page.getByText("blocked.ts")).toHaveCount(0);
+    // Defence in depth: the server rejects non-authors regardless, but the UI
+    // must not offer a control that is guaranteed to 403. The disabled state
+    // renders as a span, so no button with this name should exist at all.
+    await expect(page.getByText("No files yet")).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: /upload or paste code|\+ add/i })
+    ).toHaveCount(0);
+
+    // A disabled control with no explanation is just a dead end.
+    await expect(page.getByText(/only the author can add files/i)).toBeVisible();
+  });
+
+  test("an author is offered the control and the upload succeeds", async ({ page }) => {
+    await register(page, "author");
+    const { row } = await createSession(page, "RBAC Session Author");
+    await row.click();
+    await expect(page).toHaveURL(/\/session\//);
+
+    await expect(
+      page.getByRole("button", { name: /upload or paste code|\+ add/i }).first()
+    ).toBeVisible();
+
+    await addFile(page, "allowed.ts", "const a = 1;\n");
+    await expect(page.getByText("allowed.ts").first()).toBeVisible();
   });
 });

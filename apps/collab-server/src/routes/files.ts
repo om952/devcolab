@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { z } from "zod";
 import { prisma } from "@devcolab/database";
-import { authenticate, authorize, AuthRequest } from "../lib/middleware";
+import { authenticate, authorize, asyncHandler, AuthRequest } from "../lib/middleware";
 import { env } from "../lib/env";
 import logger from "../lib/logger";
 
@@ -142,15 +142,22 @@ router.post("/batch", authenticate, authorize("author"), async (req: AuthRequest
   res.status(201).json({ files: created, skipped, createdCount: created.length });
 });
 
-router.get("/", authenticate, async (req: AuthRequest, res) => {
+router.get(
+  "/",
+  authenticate,
+  asyncHandler(async (req: AuthRequest, res) => {
   const files = await prisma.codeFile.findMany({
     where: { sessionId: req.params.sessionId },
     orderBy: { filePath: "asc" },
   });
   res.json(files);
-});
+  })
+);
 
-router.get("/:fileId", authenticate, async (req: AuthRequest, res) => {
+router.get(
+  "/:fileId",
+  authenticate,
+  asyncHandler(async (req: AuthRequest, res) => {
   const file = await prisma.codeFile.findUnique({
     where: { id: req.params.fileId },
   });
@@ -159,6 +166,7 @@ router.get("/:fileId", authenticate, async (req: AuthRequest, res) => {
     return;
   }
   res.json(file);
-});
+  })
+);
 
 export default router;

@@ -3,6 +3,7 @@ import { z } from "zod";
 import { prisma } from "@devcolab/database";
 import logger from "../lib/logger";
 import { authenticateSocket } from "../lib/socket-auth";
+import { enrollParticipant } from "../lib/participants";
 
 const USER_COLORS = [
   "#10b981", "#3b82f6", "#f59e0b", "#ef4444",
@@ -98,11 +99,8 @@ export function setupSocketHandlers(io: Server) {
       socket.data.sessionId = sessionId;
       socket.join(sessionId);
 
-      await prisma.sessionParticipant.upsert({
-        where: { sessionId_userId: { sessionId, userId } },
-        update: { leftAt: null },
-        create: { sessionId, userId },
-      });
+      // Races with GET /api/sessions/:id, which enrols the same pair.
+      await enrollParticipant(sessionId, userId);
 
       const participants = await listParticipants(sessionId);
 
