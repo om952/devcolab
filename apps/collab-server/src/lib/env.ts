@@ -46,6 +46,12 @@ const envSchema = z
     // and bypass IP rate limits.
     TRUST_PROXY: z.coerce.number().int().min(0).default(0),
     JSON_BODY_LIMIT: z.string().default("2mb"),
+    // Brute-force budget for login/register, per IP. Tunable because the right
+    // value is deployment-specific — a shared corporate egress IP needs more
+    // headroom than a public signup page, and an end-to-end test suite that
+    // registers a fresh user per case needs far more than either.
+    AUTH_RATE_LIMIT_MAX: z.coerce.number().int().min(1).default(20),
+    AUTH_RATE_LIMIT_WINDOW_MS: z.coerce.number().int().min(1_000).default(15 * 60 * 1000),
     MAX_CODE_FILE_BYTES: z.coerce.number().default(512 * 1024),
     // Must exceed ai-service's per-agent timeout (AGENT_TIMEOUT_SECONDS,
     // default 90s). Set below it and this side aborts the stream mid-run and

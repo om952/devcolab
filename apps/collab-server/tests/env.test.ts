@@ -14,6 +14,28 @@ function messagesFor(result: ReturnType<typeof parseEnv>, path: string) {
 }
 
 describe("env validation", () => {
+  describe("auth rate limit", () => {
+    it("defaults to 20 attempts per 15 minutes", () => {
+      const result = parseEnv({ ...BASE } as any);
+      expect(result.success).toBe(true);
+      if (!result.success) return;
+      expect(result.data.AUTH_RATE_LIMIT_MAX).toBe(20);
+      expect(result.data.AUTH_RATE_LIMIT_WINDOW_MS).toBe(15 * 60 * 1000);
+    });
+
+    it("accepts an override for deployments that need more headroom", () => {
+      const result = parseEnv({ ...BASE, AUTH_RATE_LIMIT_MAX: "1000" } as any);
+      expect(result.success).toBe(true);
+      if (!result.success) return;
+      expect(result.data.AUTH_RATE_LIMIT_MAX).toBe(1000);
+    });
+
+    it("refuses a limit of zero, which would lock everyone out", () => {
+      const result = parseEnv({ ...BASE, AUTH_RATE_LIMIT_MAX: "0" } as any);
+      expect(result.success).toBe(false);
+    });
+  });
+
   it("accepts a minimal valid development config", () => {
     const result = parseEnv({ ...BASE, CORS_ORIGIN: "http://localhost:3000" } as any);
     expect(result.success).toBe(true);

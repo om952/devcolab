@@ -2,9 +2,8 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { useAuth } from "../lib/auth-context";
+import { useAuth, UnauthorizedError } from "../lib/auth-context";
 
-const API_URL = process.env.NEXT_PUBLIC_COLLAB_SERVER_URL || "http://localhost:4000";
 
 interface Session {
   id: string;
@@ -18,7 +17,7 @@ interface Session {
 
 export default function DashboardPage() {
   const router = useRouter();
-  const { user, token, logout, isLoading } = useAuth();
+  const { user, logout, isLoading, apiFetch } = useAuth();
   const [sessions, setSessions] = useState<Session[]>([]);
   const [loading, setLoading] = useState(true);
   const [showCreate, setShowCreate] = useState(false);
@@ -38,12 +37,14 @@ export default function DashboardPage() {
 
   const fetchSessions = async () => {
     try {
-      const res = await fetch(`${API_URL}/api/sessions`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const res = await apiFetch("/api/sessions");
+      // Without this the error body lands in setSessions and renders as an
+      // empty dashboard, which reads as "you have no sessions".
+      if (!res.ok) throw new Error(`Could not load sessions (${res.status})`);
       const data = await res.json();
-      setSessions(data);
+      setSessions(Array.isArray(data) ? data : []);
     } catch (err) {
+      if (err instanceof UnauthorizedError) return; // already redirecting
       console.error(err);
     } finally {
       setLoading(false);
@@ -53,12 +54,9 @@ export default function DashboardPage() {
   const createSession = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
-      const res = await fetch(`${API_URL}/api/sessions`, {
+      const res = await apiFetch("/api/sessions", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ title: newTitle, description: newDesc }),
       });
       if (res.ok) {
@@ -68,6 +66,7 @@ export default function DashboardPage() {
         fetchSessions();
       }
     } catch (err) {
+      if (err instanceof UnauthorizedError) return;
       console.error(err);
     }
   };

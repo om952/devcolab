@@ -25,6 +25,12 @@ const collabEnv = {
   JWT_SECRET: "playwright-e2e-secret-at-least-16-chars",
   CORS_ORIGIN: `http://localhost:${WEB_PORT}`,
   LOG_LEVEL: "warn",
+  // The suite registers a fresh user per test to keep cases independent, which
+  // trips the production 20-per-15-minutes auth limit partway through a run.
+  // The limit itself is covered by unit tests; raising it here keeps the
+  // browser suite deterministic instead of failing on whichever test happens
+  // to be the 21st.
+  AUTH_RATE_LIMIT_MAX: "1000",
   // Point at a dead AI service so reviews take the deterministic heuristic
   // path — an e2e smoke test must not depend on a live LLM.
   AI_SERVICE_URL: "http://127.0.0.1:59997",

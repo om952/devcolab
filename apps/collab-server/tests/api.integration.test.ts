@@ -502,6 +502,56 @@ suite("REST API integration", () => {
     });
   });
 
+  describe("GET /api/auth/me", () => {
+    it("returns the caller's identity for a valid token", async () => {
+      const { token, user, email } = await register("reviewer");
+
+      const res = await request(app).get("/api/auth/me").set("Authorization", `Bearer ${token}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({ id: user.id, email, role: "reviewer" });
+      // The password hash must never leave the server.
+      expect(res.body.password).toBeUndefined();
+    });
+
+    it("rejects a missing, malformed or forged token", async () => {
+      const none = await request(app).get("/api/auth/me");
+      expect(none.status).toBe(401);
+
+      const malformed = await request(app).get("/api/auth/me").set("Authorization", "Bearer nope");
+      expect(malformed.status).toBe(401);
+
+      // Correct shape, wrong signature.
+      const forged = await request(app)
+        .get("/api/auth/me")
+        .set(
+          "Authorization",
+          "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9." +
+            "eyJ1c2VySWQiOiJmYWtlIiwicm9sZSI6ImF1dGhvciJ9.badsignature"
+        );
+      expect(forged.status).toBe(401);
+    });
+
+    it("rejects a validly signed token for an account that no longer exists", async () => {
+      const { token, user } = await register("reviewer");
+      await prisma.user.delete({ where: { id: user.id } });
+
+      // The signature still verifies — only a database lookup can catch this.
+      const res = await request(app).get("/api/auth/me").set("Authorization", `Bearer ${token}`);
+      expect(res.status).toBe(401);
+    });
+
+    it("reports the role from the database, not the token claim", async () => {
+      const { token, user } = await register("reviewer");
+      await prisma.user.update({ where: { id: user.id }, data: { role: "author" } });
+
+      // The token still carries role=reviewer; /me must not repeat it back.
+      const res = await request(app).get("/api/auth/me").set("Authorization", `Bearer ${token}`);
+      expect(res.status).toBe(200);
+      expect(res.body.role).toBe("author");
+    });
+  });
+
   describe("concurrent enrolment", () => {
     it("survives simultaneous opens of the same session by the same user", async () => {
       const owner = await register("author");

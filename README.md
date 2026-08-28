@@ -176,6 +176,7 @@ openssl rand -hex 32   # use for INTERNAL_API_KEY
 | `CORS_ORIGIN` / `CORS_ORIGINS` | collab-server / ai-service | Comma-separated allowed browser origins. Cannot be `localhost` in production |
 | `REDIS_URL` | collab-server | Enables the Socket.IO adapter and shared rate-limit counters. Required for >1 instance |
 | `TRUST_PROXY` | collab-server | Proxy hops to trust for client IPs. `0` when exposed directly, `1` behind one load balancer |
+| `AUTH_RATE_LIMIT_MAX` / `AUTH_RATE_LIMIT_WINDOW_MS` | collab-server | Login/register attempts allowed per IP per window. Defaults to 20 per 15 min |
 | `NEXT_PUBLIC_COLLAB_SERVER_URL` | web | **Build-time.** Inlined into the client bundle; must be set as a Docker build arg, not at runtime |
 | `NEXT_PUBLIC_AI_SERVICE_URL` | web | Build-time, same as above |
 
@@ -185,8 +186,12 @@ openssl rand -hex 32   # use for INTERNAL_API_KEY
 
 - Socket.IO connections are authenticated during the handshake via the JWT.
   Client-supplied user ids are ignored — identity always comes from the token.
-- Auth endpoints are rate limited (20 per 15 min per IP); AI review is limited to
-  5 per minute per user. With `REDIS_URL` set, limits are shared across instances.
+- Auth endpoints are rate limited (20 per 15 min per IP, tunable with
+  `AUTH_RATE_LIMIT_MAX`); AI review is limited to 5 per minute per user. With
+  `REDIS_URL` set, limits are shared across instances.
+- The client asks `GET /api/auth/me` on load rather than trusting what is in
+  `localStorage`, and every authenticated request signs the user out on a 401.
+  A stale token lands on the login page instead of rendering an empty session.
 - The collab-server refuses to start in production with a default `JWT_SECRET`,
   a missing `INTERNAL_API_KEY`, or a `localhost` CORS origin.
 
@@ -202,7 +207,14 @@ link":
 | `GET /api/sessions` (dashboard) | Only sessions you created or have joined |
 | `GET /api/sessions/:id` | Anyone authenticated who has the id — opening it enrols you as a participant, so it appears on your dashboard from then on |
 | Socket `session:join` | Same rule |
-| `PATCH` / `DELETE /api/sessions/:id` | **Creator only** — the `author` role does not grant access to other people's sessions |
+| `POST /api/sessions/:id/files` | **Creator only** — adding code is ownership-based, not role-based |
+| `PATCH` / `DELETE /api/sessions/:id` | **Creator only** |
+
+Everyone registers as a `reviewer`; registration does not accept a role, so it
+cannot be used to grant yourself one. What you may do inside a session comes
+from **owning** it rather than from a role chosen at signup — a global role was
+wrong in both directions, letting any author write into anyone's session while
+stopping a creator holding the reviewer role from writing into their own.
 
 Session ids are UUIDs, so they are not discoverable by guessing; share the URL
 to invite someone. `PATCH` accepts only `title`, `description`,
@@ -391,18 +403,18 @@ clients can spoof `X-Forwarded-For` and bypass limits.
 ## Testing
 
 ```bash
-# collab-server — 66 tests (Vitest)
+# collab-server — 100 tests (Vitest)
 docker compose up -d postgres   # integration tests need a database
 npx prisma migrate deploy
 pnpm test
 
-# ai-service — 52 tests (pytest)
+# ai-service — 59 tests (pytest)
 cd apps/ai-service
 pip install -r requirements-dev.txt
 pytest -q
 ruff check .
 
-# Browser smoke tests — 9 tests (Playwright)
+# Browser smoke tests — 16 tests (Playwright)
 npx playwright install chromium
 pnpm build:collab          # the config builds the web app itself
 pnpm test:e2e
@@ -411,7 +423,8 @@ pnpm test:e2e
 The Playwright config boots a real collab-server and a freshly built web
 bundle, then drives Chromium through the landing page, registration, session
 creation, file upload, commenting over Socket.IO, an AI review run, and the
-author-only RBAC rule. It rebuilds the web app on each run because
+creator-only upload rule, and the stale-token redirect. It rebuilds the web app
+on each run because
 `NEXT_PUBLIC_*` is inlined at build time — pointing it at the test server via a
 runtime variable would silently do nothing.
 

@@ -1,6 +1,7 @@
 import rateLimit, { type Options, type Store } from "express-rate-limit";
 import { RedisStore } from "rate-limit-redis";
 import { redis } from "./redis";
+import { env } from "./env";
 import type { AuthRequest } from "./middleware";
 
 /**
@@ -25,8 +26,8 @@ const base: Partial<Options> = {
 /** Brute-force protection for login/register. Keyed by IP. */
 export const authLimiter = rateLimit({
   ...base,
-  windowMs: 15 * 60 * 1000,
-  limit: 20,
+  windowMs: env.AUTH_RATE_LIMIT_WINDOW_MS,
+  limit: env.AUTH_RATE_LIMIT_MAX,
   store: makeStore("rl:auth:"),
 });
 

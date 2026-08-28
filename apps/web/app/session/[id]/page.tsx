@@ -1,8 +1,8 @@
 "use client";
 
 import { useEffect, useState, useRef } from "react";
-import { useParams } from "next/navigation";
-import { useAuth } from "../../lib/auth-context";
+import { useParams, useRouter } from "next/navigation";
+import { useAuth, UnauthorizedError } from "../../lib/auth-context";
 import { io, Socket } from "socket.io-client";
 import CodeViewer from "../../components/CodeViewer";
 import FileTree from "../../components/FileTree";
@@ -22,7 +22,6 @@ import {
 } from "../../lib/permissions";
 import "../../styles/prism.css";
 
-const API_URL = process.env.NEXT_PUBLIC_COLLAB_SERVER_URL || "http://localhost:4000";
 const SOCKET_URL = process.env.NEXT_PUBLIC_COLLAB_SERVER_URL || "http://localhost:4000";
 
 interface Participant {
@@ -98,7 +97,8 @@ const AGENT_LABELS: Record<string, string> = {
 
 export default function SessionPage() {
   const params = useParams();
-  const { user, token } = useAuth();
+  const router = useRouter();
+  const { user, token, isLoading: authLoading, apiFetch } = useAuth();
   const sessionId = params.id as string;
 
   const [socket, setSocket] = useState<Socket | null>(null);
@@ -272,11 +272,20 @@ export default function SessionPage() {
     };
   }, [user, token, sessionId]);
 
+  useEffect(() => {
+    if (authLoading) return;
+    if (!user) router.push("/login");
+  }, [authLoading, user, router]);
+
   const fetchSessionData = async () => {
     try {
-      const res = await fetch(`${API_URL}/api/sessions/${sessionId}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const res = await apiFetch(`/api/sessions/${sessionId}`);
+      // An error body has no comments or codeFiles, so without this check the
+      // page renders a session that looks real but is empty.
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error || `Could not load session (${res.status})`);
+      }
       const data = await res.json();
       setComments(data.comments || []);
       setFiles(data.codeFiles || []);
@@ -284,8 +293,10 @@ export default function SessionPage() {
       if (data.codeFiles?.length > 0) {
         setActiveFile(data.codeFiles[0]);
       }
-    } catch (err) {
+    } catch (err: any) {
+      if (err instanceof UnauthorizedError) return; // already redirecting
       console.error(err);
+      setSocketError(err?.message ?? "Could not load this session");
     } finally {
       setLoading(false);
     }
@@ -337,9 +348,9 @@ export default function SessionPage() {
     setRuns({});
     setReviewScope(scope);
     try {
-      const res = await fetch(`${API_URL}/api/sessions/${sessionId}${path}`, {
+      const res = await apiFetch(`/api/sessions/${sessionId}${path}`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
 
@@ -397,9 +408,7 @@ export default function SessionPage() {
 
   const pollRun = async (runId: string) => {
     try {
-      const res = await fetch(`${API_URL}/api/sessions/${sessionId}/ai-review/${runId}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const res = await apiFetch(`/api/sessions/${sessionId}/ai-review/${runId}`);
       if (!res.ok) return;
       const run = await res.json();
       if (run.status !== "completed" && run.status !== "failed") return;
@@ -515,12 +524,9 @@ export default function SessionPage() {
       let done = 0;
 
       for (const batch of batches) {
-        const res = await fetch(`${API_URL}/api/sessions/${sessionId}/files/batch`, {
+        const res = await apiFetch(`/api/sessions/${sessionId}/files/batch`, {
           method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${token}`,
-          },
+          headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ files: batch }),
         });
 
@@ -569,12 +575,9 @@ export default function SessionPage() {
       const content = await file.text();
       const language = detectLanguage(file.name);
 
-      const res = await fetch(`${API_URL}/api/sessions/${sessionId}/files`, {
+      const res = await apiFetch(`/api/sessions/${sessionId}/files`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           filePath: file.name,
           content,
@@ -610,12 +613,9 @@ export default function SessionPage() {
     try {
       const language = detectLanguage(pasteFileName);
 
-      const res = await fetch(`${API_URL}/api/sessions/${sessionId}/files`, {
+      const res = await apiFetch(`/api/sessions/${sessionId}/files`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           filePath: pasteFileName,
           content: pasteContent,
@@ -653,6 +653,9 @@ export default function SessionPage() {
     if (file) handleFileUpload(file);
   };
 
+  // Rendering null here left a signed-out visitor staring at a blank page.
+  // Send them to login the way the dashboard does — but only once auth has
+  // finished restoring, or a hard reload bounces a signed-in user.
   if (!user) return null;
   if (loading) return <div className="p-8">Loading session...</div>;
 
