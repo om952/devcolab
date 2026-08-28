@@ -108,7 +108,8 @@ jobs:
           cache-dependency-path: apps/ai-service/requirements-dev.txt
 
       - name: Install dependencies
-        run: pip install -r requirements-dev.txt
+        # --require-hashes so CI installs exactly what the image will.
+        run: pip install --require-hashes -r requirements-dev.txt
 
       - name: Lint
         run: ruff check .

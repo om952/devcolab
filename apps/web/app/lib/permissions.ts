@@ -7,7 +7,7 @@
  * is unavailable instead of surfacing a generic error after the fact.
  *
  * Keep in sync with:
- *   routes/files.ts      authorize("author")
+ *   routes/files.ts      requireSessionCreator (ownership, not role)
  *   routes/ai-review.ts  authorize("author", "reviewer", "ai_reviewer")
  *   routes/sessions.ts   creator-only for PATCH / DELETE
  */
@@ -24,9 +24,14 @@ export function roleLabel(role?: string | null): string {
   return role ? ROLE_LABELS[role] ?? role : "Unknown";
 }
 
-/** Only authors own the code under review, so only they may add files. */
-export function canAddFiles(role?: string | null): boolean {
-  return role === "author";
+/**
+ * Adding files is an ownership question, not a role one: you may add files to
+ * a session you created. A global role was wrong in both directions — it let
+ * any author write into anyone's session, and stopped a creator holding the
+ * reviewer role from writing into their own.
+ */
+export function canAddFiles(userId?: string | null, createdById?: string | null): boolean {
+  return Boolean(userId && createdById && userId === createdById);
 }
 
 /** Any authenticated participant may request an AI review. */
@@ -40,8 +45,11 @@ export function canManageSession(userId?: string | null, createdById?: string | 
 }
 
 /** Human-readable reason a control is disabled, or null when it is allowed. */
-export function whyCannotAddFiles(role?: string | null): string | null {
-  return canAddFiles(role)
+export function whyCannotAddFiles(
+  userId?: string | null,
+  createdById?: string | null
+): string | null {
+  return canAddFiles(userId, createdById)
     ? null
-    : `Only the author can add files to a session. You joined as ${roleLabel(role)}.`;
+    : "Only the person who created this session can add files to it.";
 }

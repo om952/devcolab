@@ -1,5 +1,12 @@
 generator client {
   provider = "prisma-client-js"
+  // The runtime images are node:20-alpine (musl libc, OpenSSL 3.x). Without
+  // these targets Prisma emits only the build host's engine, so the container
+  // fails at the first query with "Error loading shared library libssl.so.1.1"
+  // and every database call — including the readiness probe — fails.
+  // Both architectures are listed so an arm64 build machine and an amd64
+  // production host produce the same working image.
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x", "linux-musl-arm64-openssl-3.0.x"]
 }
 
 datasource db {

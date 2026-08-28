@@ -16,11 +16,18 @@ export const loginSchema = z.object({
   password: z.string().min(6),
 });
 
+/**
+ * Deliberately has no `role` field. Accepting one let anyone register as an
+ * author — or as `ai_reviewer`, the role reserved for the system account that
+ * authors AI comments — which made the whole role boundary self-service.
+ *
+ * Everyone registers as a reviewer. What you may do inside a session comes
+ * from owning it, not from a role you picked at signup; see requireSessionCreator.
+ */
 export const registerSchema = z.object({
   email: z.string().email(),
   name: z.string().min(2),
   password: z.string().min(6),
-  role: z.enum(["author", "reviewer", "ai_reviewer"]).optional(),
 });
 
 export type LoginInput = z.infer<typeof loginSchema>;
@@ -36,7 +43,8 @@ export async function registerUser(data: RegisterInput) {
       email: data.email,
       name: data.name,
       password: hashedPassword,
-      role: data.role || "reviewer",
+      // Never client-controlled. ai_reviewer is assigned only by lib/ai-user.
+      role: "reviewer",
     },
   });
 

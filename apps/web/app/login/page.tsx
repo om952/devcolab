@@ -13,7 +13,6 @@ export default function LoginPage() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [name, setName] = useState("");
-  const [role, setRole] = useState("reviewer");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
@@ -24,7 +23,7 @@ export default function LoginPage() {
 
     try {
       const endpoint = isRegister ? "/api/auth/register" : "/api/auth/login";
-      const body = isRegister ? { email, password, name, role } : { email, password };
+      const body = isRegister ? { email, password, name } : { email, password };
 
       const res = await fetch(`${API_URL}${endpoint}`, {
         method: "POST",
@@ -65,15 +64,6 @@ export default function LoginPage() {
                 className="w-full rounded-lg bg-slate-800 px-4 py-3 text-sm outline-none ring-1 ring-slate-700 focus:ring-emerald-500"
                 required
               />
-              <select
-                value={role}
-                onChange={(e) => setRole(e.target.value)}
-                className="w-full rounded-lg bg-slate-800 px-4 py-3 text-sm outline-none ring-1 ring-slate-700 focus:ring-emerald-500"
-              >
-                <option value="reviewer">Reviewer</option>
-                <option value="author">Author</option>
-                <option value="ai_reviewer">AI Reviewer</option>
-              </select>
             </>
           )}
           <input

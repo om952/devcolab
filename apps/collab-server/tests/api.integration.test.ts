@@ -14,6 +14,11 @@ suite("REST API integration", () => {
   let app: Express;
   const createdEmails: string[] = [];
 
+  /**
+   * The `role` argument is deliberately still sent. Registration ignores it —
+   * everyone is a reviewer — so passing it here keeps the call sites readable
+   * while continuously exercising the fact that it has no effect.
+   */
   const register = async (role: string) => {
     const email = uniqueEmail();
     createdEmails.push(email);
@@ -131,26 +136,55 @@ suite("REST API integration", () => {
       expect(participants.map((p) => p.userId)).toContain(user.id);
     });
 
-    it("lets an author upload a file but forbids a reviewer", async () => {
-      const author = await register("author");
-      const reviewer = await register("reviewer");
+    it("lets the session creator upload a file but forbids everyone else", async () => {
+      // Ownership, not role: every account registers as a reviewer now, so if
+      // this still worked on a role check nobody could ever upload anything.
+      const creator = await register("author");
+      const other = await register("reviewer");
+      expect(creator.user.role).toBe("reviewer");
 
       const session = await request(app)
         .post("/api/sessions")
-        .set("Authorization", `Bearer ${author.token}`)
+        .set("Authorization", `Bearer ${creator.token}`)
         .send({ title: "RBAC" });
 
-      const asAuthor = await request(app)
+      const asCreator = await request(app)
         .post(`/api/sessions/${session.body.id}/files`)
-        .set("Authorization", `Bearer ${author.token}`)
+        .set("Authorization", `Bearer ${creator.token}`)
         .send({ filePath: "a.ts", content: "const a = 1;", language: "typescript" });
-      expect(asAuthor.status).toBe(201);
+      expect(asCreator.status).toBe(201);
 
-      const asReviewer = await request(app)
+      const asOther = await request(app)
         .post(`/api/sessions/${session.body.id}/files`)
-        .set("Authorization", `Bearer ${reviewer.token}`)
+        .set("Authorization", `Bearer ${other.token}`)
         .send({ filePath: "b.ts", content: "const b = 1;", language: "typescript" });
-      expect(asReviewer.status).toBe(403);
+      expect(asOther.status).toBe(403);
+
+      // Batch upload must be gated identically; it writes through the same path.
+      const batchAsOther = await request(app)
+        .post(`/api/sessions/${session.body.id}/files/batch`)
+        .set("Authorization", `Bearer ${other.token}`)
+        .send({ files: [{ filePath: "c.ts", content: "const c = 1;" }] });
+      expect(batchAsOther.status).toBe(403);
+    });
+
+    it("ignores a client-supplied role at registration", async () => {
+      // Registration used to write whatever role the client asked for, so a
+      // stranger could sign up as an author, or as ai_reviewer — the account
+      // that authors AI comments — and appear as the AI in the participant list.
+      for (const attempted of ["author", "ai_reviewer", "admin"]) {
+        const email = uniqueEmail();
+        createdEmails.push(email);
+        const res = await request(app)
+          .post("/api/auth/register")
+          .send({ email, name: "Role Probe", password: "password123", role: attempted });
+
+        expect(res.status).toBe(201);
+        expect(res.body.user.role).toBe("reviewer");
+
+        const stored = await prisma.user.findUnique({ where: { email } });
+        expect(stored?.role).toBe("reviewer");
+      }
     });
 
     it("returns 404 for a file belonging to another session", async () => {

@@ -1,0 +1,7 @@
+# Dev/test tooling. Regenerate:
+#   uv pip compile requirements-dev.in --python-version 3.12 --generate-hashes -o requirements-dev.txt
+-r requirements.in
+
+pytest>=8.2.0
+pytest-asyncio>=0.23.0
+ruff>=0.5.0

@@ -6,7 +6,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 COPY apps/ai-service/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# --require-hashes: every package is pinned to an exact version and hash, so a
+# rebuild months from now installs byte-identical dependencies instead of
+# silently resolving a newer langchain/langgraph. Fails loudly if the lock is
+# incomplete. Regenerate with the uv command at the top of requirements.in.
+RUN pip install --no-cache-dir --require-hashes -r requirements.txt
 
 COPY apps/ai-service/app ./app
 

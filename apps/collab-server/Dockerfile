@@ -1,5 +1,8 @@
 FROM node:20-alpine AS base
-RUN corepack enable && corepack prepare pnpm@9 --activate
+# Prisma's query engine links against OpenSSL, which the bare node:20-alpine
+# image does not ship. Without it the engine cannot load and every query fails.
+RUN apk add --no-cache openssl \
+  && corepack enable && corepack prepare pnpm@9 --activate
 WORKDIR /app
 
 FROM base AS deps
@@ -15,6 +18,15 @@ COPY --from=deps /app/apps/collab-server/node_modules ./apps/collab-server/node_
 COPY --from=deps /app/packages/shared-types/node_modules ./packages/shared-types/node_modules
 COPY --from=deps /app/packages/database/node_modules ./packages/database/node_modules
 COPY . .
+
+# Generate the Prisma client before compiling. The deps stage installs from
+# package.json alone, where prisma/schema.prisma is not yet present, so the
+# postinstall generate produces nothing usable. This was previously masked by
+# COPY . . pulling in the host's already-generated client along with its
+# node_modules — with a .dockerignore in place, tsc fails on missing Prisma
+# types instead.
+RUN pnpm exec prisma generate
+
 RUN pnpm --filter @devcolab/shared-types build
 RUN pnpm --filter @devcolab/database build
 RUN pnpm --filter @devcolab/collab-server build

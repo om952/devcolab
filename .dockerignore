@@ -1,0 +1,71 @@
+# Docker build context exclusions.
+#
+# Without this, `COPY . .` in the Node Dockerfiles copies the host's
+# node_modules over the Linux dependencies installed in the deps stage —
+# shipping macOS binaries (rollup.darwin-arm64.node, fsevents, Prisma's
+# darwin query engine) into a Linux image. It also sent ~915 MB of context
+# on every build.
+
+# Dependencies — always installed inside the image, never copied in
+node_modules
+**/node_modules
+.pnpm-store
+
+# Build outputs — rebuilt inside the image
+dist
+**/dist
+.next
+**/.next
+out
+build
+*.tsbuildinfo
+
+# Python
+__pycache__
+**/__pycache__
+*.py[cod]
+.venv
+**/.venv
+venv
+.pytest_cache
+**/.pytest_cache
+.ruff_cache
+**/.ruff_cache
+
+# Secrets — must never enter an image layer, even an intermediate one
+.env
+.env.*
+!.env.example
+**/.env
+**/.env.*
+!**/.env.example
+
+# VCS and CI
+.git
+.gitignore
+.github
+
+# Test and tooling artifacts
+test-results
+playwright-report
+blob-report
+.playwright
+coverage
+e2e
+
+# Editor and OS
+.idea
+.vscode
+.DS_Store
+Thumbs.db
+
+# Docs and local tooling — not needed to build or run
+docs
+deploy
+scripts
+README.md
+*.md
+!apps/**/README.md
+docker-compose*.yml
+playwright.config.ts
+.claude

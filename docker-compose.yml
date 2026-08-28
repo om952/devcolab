@@ -72,7 +72,7 @@ services:
       - DATABASE_URL=postgresql://${POSTGRES_USER:-devcolab}:${POSTGRES_PASSWORD:-devcolab}@postgres:5432/${POSTGRES_DB:-devcolab}
       - "CORS_ORIGINS=${CORS_ORIGIN:?CORS_ORIGIN must be set}"
       - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
-      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-3.5-flash}
+      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-3.6-flash}
       - GROQ_API_KEY=${GROQ_API_KEY:-}
       - HUGGINGFACE_API_TOKEN=${HUGGINGFACE_API_TOKEN:-}
       - OLLAMA_HOST=${OLLAMA_HOST:-}

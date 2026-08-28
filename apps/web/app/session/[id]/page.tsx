@@ -122,6 +122,8 @@ export default function SessionPage() {
   } | null>(null);
   const [skipped, setSkipped] = useState<SkipReason[]>([]);
   const [socketError, setSocketError] = useState<string | null>(null);
+  /** Creator of this session. Adding files is ownership-based, not role-based. */
+  const [createdById, setCreatedById] = useState<string | null>(null);
   // Keyed by run id: a folder review has one run per file, all in flight.
   const [runs, setRuns] = useState<Record<string, RunProgress>>({});
   /** How many files the current review covers; >1 renders the folder summary. */
@@ -278,6 +280,7 @@ export default function SessionPage() {
       const data = await res.json();
       setComments(data.comments || []);
       setFiles(data.codeFiles || []);
+      setCreatedById(data.createdById ?? null);
       if (data.codeFiles?.length > 0) {
         setActiveFile(data.codeFiles[0]);
       }
@@ -585,7 +588,7 @@ export default function SessionPage() {
         // than reporting a generic failure.
         throw new Error(
           res.status === 403
-            ? whyCannotAddFiles(user?.role) ?? 'You do not have permission to add files'
+            ? whyCannotAddFiles(user?.id, createdById) ?? 'You do not have permission to add files'
             : body.error || `Upload failed (${res.status})`
         );
       }
@@ -626,7 +629,7 @@ export default function SessionPage() {
         // than reporting a generic failure.
         throw new Error(
           res.status === 403
-            ? whyCannotAddFiles(user?.role) ?? 'You do not have permission to add files'
+            ? whyCannotAddFiles(user?.id, createdById) ?? 'You do not have permission to add files'
             : body.error || `Upload failed (${res.status})`
         );
       }
@@ -840,7 +843,7 @@ export default function SessionPage() {
             <h3 className="text-xs font-medium uppercase tracking-wider text-slate-500">Files</h3>
             {/* Mirrors authorize("author") on POST /files — the server rejects
                 non-authors regardless, this just avoids offering a dead control. */}
-            {canAddFiles(user.role) ? (
+            {canAddFiles(user.id, createdById) ? (
               <button
                 onClick={() => setShowUploadModal(true)}
                 className="rounded bg-slate-800 px-2 py-1 text-xs text-emerald-400 hover:bg-slate-700"
@@ -850,7 +853,7 @@ export default function SessionPage() {
             ) : (
               <span
                 className="cursor-not-allowed rounded bg-slate-800/50 px-2 py-1 text-xs text-slate-600"
-                title={whyCannotAddFiles(user.role) ?? undefined}
+                title={whyCannotAddFiles(user.id, createdById) ?? undefined}
               >
                 + Add
               </span>
@@ -869,7 +872,7 @@ export default function SessionPage() {
           {files.length === 0 && (
             <div className="rounded border border-dashed border-slate-700 p-4 text-center">
               <p className="text-sm text-slate-500">No files yet</p>
-              {canAddFiles(user.role) ? (
+              {canAddFiles(user.id, createdById) ? (
                 <button
                   onClick={() => setShowUploadModal(true)}
                   className="mt-2 text-sm text-emerald-400 hover:text-emerald-300"
@@ -878,7 +881,7 @@ export default function SessionPage() {
                 </button>
               ) : (
                 <p className="mt-2 text-xs text-slate-600">
-                  {whyCannotAddFiles(user.role)}
+                  {whyCannotAddFiles(user.id, createdById)}
                 </p>
               )}
             </div>

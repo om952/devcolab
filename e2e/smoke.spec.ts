@@ -6,13 +6,13 @@ function newUser() {
   return { email: `e2e-${stamp}@example.com`, name: "E2E Tester", password: "password123" };
 }
 
-async function register(page: Page, role: "author" | "reviewer" = "author") {
+/** Everyone registers as a reviewer; what you may do comes from owning a session. */
+async function register(page: Page) {
   const user = newUser();
   await page.goto("/login");
   await page.getByRole("button", { name: /sign up/i }).click();
 
   await page.getByPlaceholder("Name").fill(user.name);
-  await page.getByRole("combobox").selectOption(role);
   await page.getByPlaceholder("Email").fill(user.email);
   await page.getByPlaceholder("Password").fill(user.password);
   await page.getByRole("button", { name: /sign up/i }).click();
@@ -116,7 +116,7 @@ test.describe("auth", () => {
 
 test.describe("review session", () => {
   test("creates a session, adds a file, and comments on a line", async ({ page }) => {
-    await register(page, "author");
+    await register(page);
     const { row } = await createSession(page, "E2E Review Session");
 
     await row.click();
@@ -137,7 +137,7 @@ test.describe("review session", () => {
   });
 
   test("AI review streams per-agent progress to completion", async ({ page }) => {
-    await register(page, "author");
+    await register(page);
     const { row } = await createSession(page, "E2E AI Review");
 
     await row.click();
@@ -213,27 +213,9 @@ test.describe("session visibility", () => {
 });
 
 test.describe("access control", () => {
-  test("a reviewer is not offered the upload control, and is told why", async ({ page }) => {
-    await register(page, "reviewer");
-    const { row } = await createSession(page, "RBAC Session");
-    await row.click();
-    await expect(page).toHaveURL(/\/session\//);
-
-    // Defence in depth: the server rejects non-authors regardless, but the UI
-    // must not offer a control that is guaranteed to 403. The disabled state
-    // renders as a span, so no button with this name should exist at all.
-    await expect(page.getByText("No files yet")).toBeVisible();
-    await expect(
-      page.getByRole("button", { name: /upload or paste code|\+ add/i })
-    ).toHaveCount(0);
-
-    // A disabled control with no explanation is just a dead end.
-    await expect(page.getByText(/only the author can add files/i)).toBeVisible();
-  });
-
-  test("an author is offered the control and the upload succeeds", async ({ page }) => {
-    await register(page, "author");
-    const { row } = await createSession(page, "RBAC Session Author");
+  test("the session creator is offered the control and the upload succeeds", async ({ page }) => {
+    await register(page);
+    const { row } = await createSession(page, "Owned Session");
     await row.click();
     await expect(page).toHaveURL(/\/session\//);
 
@@ -243,5 +225,35 @@ test.describe("access control", () => {
 
     await addFile(page, "allowed.ts", "const a = 1;\n");
     await expect(page.getByText("allowed.ts").first()).toBeVisible();
+  });
+
+  test("someone who joins by link is not offered the control, and is told why", async ({ browser }) => {
+    const ownerCtx = await browser.newContext();
+    const guestCtx = await browser.newContext();
+    const ownerPage = await ownerCtx.newPage();
+    const guestPage = await guestCtx.newPage();
+
+    await register(ownerPage);
+    const { row } = await createSession(ownerPage, "Link Guarded");
+    await row.click();
+    await expect(ownerPage).toHaveURL(/\/session\//);
+    const sessionUrl = ownerPage.url();
+
+    // The guest holds the link and is a full participant, but does not own the
+    // session. Defence in depth: the server 403s regardless, but the UI must
+    // not offer a control guaranteed to fail. The disabled state renders as a
+    // span, so no button with this name should exist for them at all.
+    await register(guestPage);
+    await guestPage.goto(sessionUrl);
+    await expect(guestPage.getByText("No files yet")).toBeVisible();
+    await expect(
+      guestPage.getByRole("button", { name: /upload or paste code|\+ add/i })
+    ).toHaveCount(0);
+
+    // A disabled control with no explanation is just a dead end.
+    await expect(guestPage.getByText(/only the person who created this session/i)).toBeVisible();
+
+    await ownerCtx.close();
+    await guestCtx.close();
   });
 });

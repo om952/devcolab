@@ -1,0 +1,17 @@
+# Loose constraints — the source of truth for UPGRADES.
+# The pinned, hashed lock in requirements.txt is what actually gets installed.
+# Regenerate after editing this file:
+#   uv pip compile requirements.in --python-version 3.12 --generate-hashes -o requirements.txt
+fastapi>=0.111.0
+uvicorn[standard]>=0.29.0
+langgraph>=0.0.55
+langchain>=0.2.0
+langchain-google-genai>=2.0.0
+langchain-groq>=0.1.0
+langchain-ollama>=0.1.0
+python-dotenv>=1.0.1
+httpx>=0.27.0
+pydantic>=2.7.0
+pydantic-settings>=2.3.0
+structlog>=24.1.0
+sentry-sdk[fastapi]>=2.5.0
