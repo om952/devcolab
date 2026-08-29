@@ -1,4 +1,4 @@
-FROM node:20-alpine AS base
+FROM node:26-alpine AS base
 # Prisma's query engine links against OpenSSL, which the bare node:20-alpine
 # image does not ship. Without it the engine cannot load and every query fails.
 RUN apk add --no-cache openssl \
