@@ -74,13 +74,29 @@ pnpm db:migrate
 
 ## 5. Start the stack
 
+Production runs the images CI built, scanned and pushed to GHCR — it does not
+compile anything. Pick the commit you are deploying and pin it:
+
+```bash
+export DEVCOLAB_IMAGE_TAG=<commit sha>   # must be a SHA, never `latest`
+```
+
+Confirm CI actually published that SHA before continuing (Actions -> the run
+for that commit -> the "Docker build, scan and publish" job summary).
+
 ```bash
 # Bundled Postgres:
-docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
 
 # Neon:
 docker compose -f docker-compose.yml -f docker-compose.prod.yml \
-  -f docker-compose.neon.yml up -d --build
+  -f docker-compose.neon.yml up -d
+```
+
+If the images are private, authenticate the host once:
+
+```bash
+echo $GHCR_TOKEN | docker login ghcr.io -u <github username> --password-stdin
 ```
 
 ## 6. Verify
@@ -98,9 +114,9 @@ bundled path, that `postgres` is healthy (`docker compose ps`).
 ## Redeploying
 
 ```bash
-git pull
+export DEVCOLAB_IMAGE_TAG=<new commit sha>
 docker compose -f docker-compose.yml -f docker-compose.prod.yml \
-  [-f docker-compose.neon.yml] up -d --build
+  [-f docker-compose.neon.yml] up -d
 ```
 
 Both app services drain on `SIGTERM` (connected clients get a
@@ -111,14 +127,22 @@ migrations on boot.
 
 ## Rollback
 
-Prisma migrations here are forward-only — there's no automatic `down`.
-Rolling back means:
+Rolling back is changing the tag back to the previous SHA — no rebuild, no
+checkout, and the image you land on is one CI already tested and scanned:
 
-1. Redeploy the previous image/commit (`git checkout <previous-sha>` then
-   repeat the "Redeploying" steps above).
-2. Only hand-write a reverse migration if the failed migration actually
-   broke data compatibility with the old code — most bad deploys are a code
-   bug, not a schema problem, and don't need one.
+```bash
+export DEVCOLAB_IMAGE_TAG=<previous known-good sha>
+docker compose -f docker-compose.yml -f docker-compose.prod.yml \
+  [-f docker-compose.neon.yml] up -d
+```
+
+Keep the last known-good SHA written down somewhere before you deploy, so you
+are not searching for it during an incident.
+
+Prisma migrations are forward-only, so the schema does not roll back with the
+code. Only hand-write a reverse migration if the failed migration actually
+broke compatibility with the old code — most bad deploys are a code bug, not a
+schema problem, and don't need one.
 
 ## Troubleshooting
 
@@ -127,4 +151,6 @@ Rolling back means:
 | Caddy never gets a cert | DNS records not resolving yet — recheck with `dig devcolab.example.com` |
 | `preflight.sh` fails on `POSTGRES_PASSWORD` | Still set to the `.env.example` default (`devcolab`) — generate a real one |
 | `/health/ready` is `503` after deploy | Database unreachable — check `DATABASE_URL`, and for Neon, that the free tier isn't still waking from idle |
-| Web app calls `localhost:4000` in prod | `NEXT_PUBLIC_*` vars are baked in at **build** time — `docker compose build web` after changing them, restart alone won't pick them up |
+| Web app calls `localhost:4000` in prod | `NEXT_PUBLIC_*` vars are baked in at **build** time, and images are now built by CI — set them as repository *variables* (`NEXT_PUBLIC_COLLAB_SERVER_URL`, `NEXT_PUBLIC_AI_SERVICE_URL`) under Settings -> Secrets and variables -> Actions, then re-run CI to publish a corrected image |
+| `manifest unknown` when starting | The SHA has no published image — check CI succeeded for that commit, and that you are on a SHA from `master` |
+| Compose errors on `DEVCOLAB_IMAGE_TAG` | Deliberate: the overlay refuses to start without a pinned tag |

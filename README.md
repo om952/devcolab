@@ -305,7 +305,9 @@ openssl rand -hex 32   # INTERNAL_API_KEY
 export DATABASE_URL=postgresql://devcolab:<password>@localhost:5433/devcolab
 pnpm db:migrate
 
-docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+# Production runs images CI built, scanned and pushed — it compiles nothing.
+export DEVCOLAB_IMAGE_TAG=<commit sha>
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
 ```
 
 The production overlay differs from the development file in ways that matter:
@@ -356,7 +358,7 @@ changes — just an extra compose overlay.
 
    ```bash
    docker compose -f docker-compose.yml -f docker-compose.prod.yml \
-     -f docker-compose.neon.yml up -d --build
+     -f docker-compose.neon.yml up -d
    ```
 
 `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` are unused in this mode

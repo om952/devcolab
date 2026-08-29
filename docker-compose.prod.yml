@@ -1,6 +1,11 @@
 # Production overlay. Use together with the base file:
 #
-#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# Note: no --build. This overlay runs the images CI built, scanned and pushed,
+# pinned by commit SHA in DEVCOLAB_IMAGE_TAG. Production compiling its own
+# artifacts means the thing serving traffic is not the thing that was tested,
+# and makes rollback a rebuild instead of a tag change.
 #
 # Differences from the base (development) file:
 #   - Postgres and Redis are not published to the host; only the internal
@@ -36,6 +41,8 @@ services:
     logging: *logging
 
   collab-server:
+    image: ${DEVCOLAB_REGISTRY:-ghcr.io/om952}/devcolab-collab-server:${DEVCOLAB_IMAGE_TAG:?DEVCOLAB_IMAGE_TAG must be set to the commit SHA you are deploying}
+    build: !reset null
     ports: !override []
     environment:
       - NODE_ENV=production
@@ -59,6 +66,8 @@ services:
     logging: *logging
 
   ai-service:
+    image: ${DEVCOLAB_REGISTRY:-ghcr.io/om952}/devcolab-ai-service:${DEVCOLAB_IMAGE_TAG:?DEVCOLAB_IMAGE_TAG must be set to the commit SHA you are deploying}
+    build: !reset null
     ports: !override []
     environment:
       - ENVIRONMENT=production
@@ -81,6 +90,8 @@ services:
     logging: *logging
 
   web:
+    image: ${DEVCOLAB_REGISTRY:-ghcr.io/om952}/devcolab-web:${DEVCOLAB_IMAGE_TAG:?DEVCOLAB_IMAGE_TAG must be set to the commit SHA you are deploying}
+    build: !reset null
     ports: !override []
     deploy:
       resources:

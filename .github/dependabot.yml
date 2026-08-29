@@ -1,0 +1,35 @@
+version: 2
+
+# Trivy catches vulnerable layers in the built images, but nothing was watching
+# the dependency trees between releases. Grouped so a week of patch bumps is one
+# PR rather than thirty.
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule: { interval: weekly }
+    open-pull-requests-limit: 5
+    groups:
+      npm-minor-and-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: pip
+    directory: /apps/ai-service
+    schedule: { interval: weekly }
+    open-pull-requests-limit: 5
+    groups:
+      pip-minor-and-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: { interval: monthly }
+
+  - package-ecosystem: docker
+    directory: /apps/collab-server
+    schedule: { interval: monthly }
+  - package-ecosystem: docker
+    directory: /apps/ai-service
+    schedule: { interval: monthly }
+  - package-ecosystem: docker
+    directory: /apps/web
+    schedule: { interval: monthly }

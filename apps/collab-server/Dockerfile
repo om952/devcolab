@@ -10,7 +10,9 @@ COPY package.json pnpm-workspace.yaml pnpm-lock.yaml* ./
 COPY apps/collab-server/package.json ./apps/collab-server/
 COPY packages/shared-types/package.json ./packages/shared-types/
 COPY packages/database/package.json ./packages/database/
-RUN pnpm install --frozen-lockfile || pnpm install
+# No `|| pnpm install` fallback: a stale lockfile must fail the build,
+# not silently resolve fresh versions — which is the whole point of the flag.
+RUN pnpm install --frozen-lockfile
 
 FROM base AS builder
 COPY --from=deps /app/node_modules ./node_modules
