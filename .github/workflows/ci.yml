@@ -146,7 +146,7 @@ jobs:
       # Build once, locally, so the scan runs against the exact image that will
       # be published. Scanning a separate build would prove nothing about it.
       - name: Build ${{ matrix.name }}
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: ${{ matrix.dockerfile }}
@@ -193,7 +193,7 @@ jobs:
 
       - name: Push ${{ matrix.name }} to GHCR
         if: github.ref == 'refs/heads/master' && github.event_name == 'push'
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: ${{ matrix.dockerfile }}
