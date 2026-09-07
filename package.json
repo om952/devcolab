@@ -19,7 +19,7 @@
     "node": ">=18"
   },
   "devDependencies": {
-    "@playwright/test": "^1.62.0",
+    "@playwright/test": "^1.62.1",
     "@prisma/client": "5.14.0",
     "prisma": "5.14.0"
   }
