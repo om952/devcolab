@@ -1,14 +1,17 @@
 /**
- * Client-side mirror of the `authorize(...)` guards in collab-server.
+ * Client-side mirror of the session-role guards in collab-server
+ * (lib/session-access.ts, requireSessionRole).
  *
  * The server remains authoritative — every rule here is enforced again on the
  * API, and bypassing this file only earns a 403. Its job is to stop the UI
  * offering controls that are guaranteed to fail, and to explain why a control
  * is unavailable instead of surfacing a generic error after the fact.
  *
- * Keep in sync with:
- *   routes/files.ts      requireSessionCreator (ownership, not role)
- *   routes/ai-review.ts  authorize("author", "reviewer", "ai_reviewer")
+ * Roles are per session: whoever created a session is its author, everyone
+ * who joined through its link is a reviewer. Keep in sync with:
+ *   routes/files.ts      POST: author
+ *   routes/ai-review.ts  POST: author, reviewer
+ *   routes/comments.ts   POST: author, reviewer
  *   routes/sessions.ts   creator-only for PATCH / DELETE
  */
 
@@ -34,9 +37,15 @@ export function canAddFiles(userId?: string | null, createdById?: string | null)
   return Boolean(userId && createdById && userId === createdById);
 }
 
-/** Any authenticated participant may request an AI review. */
+/** Your role in one session: author if you created it, otherwise reviewer. */
+export function sessionRole(userId?: string | null, createdById?: string | null): Role | null {
+  if (!userId || !createdById) return null;
+  return userId === createdById ? "author" : "reviewer";
+}
+
+/** Authors and reviewers may request an AI review. */
 export function canTriggerReview(role?: string | null): boolean {
-  return role === "author" || role === "reviewer" || role === "ai_reviewer";
+  return role === "author" || role === "reviewer";
 }
 
 /** Session settings are ownership-based, not role-based. */

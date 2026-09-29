@@ -2,7 +2,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { prisma } from "@devcolab/database";
 import { authenticate, asyncHandler, AuthRequest } from "../lib/middleware";
-import { requireSessionCreator } from "../lib/session-access";
+import { ANY_MEMBER, requireSessionRole } from "../lib/session-access";
 import { env } from "../lib/env";
 import logger from "../lib/logger";
 
@@ -62,7 +62,7 @@ async function upsertFile(params: {
   });
 }
 
-router.post("/", authenticate, requireSessionCreator, async (req: AuthRequest, res) => {
+router.post("/", authenticate, requireSessionRole("author"), async (req: AuthRequest, res) => {
   try {
     const data = createFileSchema.parse(req.body);
 
@@ -97,7 +97,7 @@ router.post("/", authenticate, requireSessionCreator, async (req: AuthRequest, r
  * than failing the whole batch, so one bad file in a large folder does not
  * discard the rest of the import.
  */
-router.post("/batch", authenticate, requireSessionCreator, async (req: AuthRequest, res) => {
+router.post("/batch", authenticate, requireSessionRole("author"), async (req: AuthRequest, res) => {
   const parsed = batchFileSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: parsed.error.issues[0]?.message ?? "Invalid batch" });
@@ -146,6 +146,7 @@ router.post("/batch", authenticate, requireSessionCreator, async (req: AuthReque
 router.get(
   "/",
   authenticate,
+  requireSessionRole(...ANY_MEMBER),
   asyncHandler(async (req: AuthRequest, res) => {
   const files = await prisma.codeFile.findMany({
     where: { sessionId: req.params.sessionId },
@@ -158,6 +159,7 @@ router.get(
 router.get(
   "/:fileId",
   authenticate,
+  requireSessionRole(...ANY_MEMBER),
   asyncHandler(async (req: AuthRequest, res) => {
   const file = await prisma.codeFile.findUnique({
     where: { id: req.params.fileId },

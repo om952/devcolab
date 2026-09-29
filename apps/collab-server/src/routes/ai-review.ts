@@ -1,7 +1,8 @@
 import { Router } from "express";
 import { z } from "zod";
 import { prisma } from "@devcolab/database";
-import { authenticate, authorize, asyncHandler, AuthRequest } from "../lib/middleware";
+import { authenticate, asyncHandler, AuthRequest } from "../lib/middleware";
+import { ANY_MEMBER, requireSessionRole } from "../lib/session-access";
 import { aiReviewLimiter } from "../lib/rate-limit";
 import { dailyLimitMessage, remainingDailyReviews } from "../lib/ai-quota";
 import { enqueueReview, enqueueReviewBatch } from "../services/ai-review-runner";
@@ -36,7 +37,7 @@ router.post(
   "/",
   authenticate,
   aiReviewLimiter,
-  authorize("author", "reviewer", "ai_reviewer"),
+  requireSessionRole("author", "reviewer"),
   async (req: AuthRequest, res) => {
     const parsed = triggerSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -97,7 +98,7 @@ router.post(
   "/batch",
   authenticate,
   aiReviewLimiter,
-  authorize("author", "reviewer", "ai_reviewer"),
+  requireSessionRole("author", "reviewer"),
   async (req: AuthRequest, res) => {
     const parsed = batchTriggerSchema.safeParse(req.body ?? {});
     if (!parsed.success) {
@@ -168,6 +169,7 @@ router.post(
 router.get(
   "/",
   authenticate,
+  requireSessionRole(...ANY_MEMBER),
   asyncHandler(async (req: AuthRequest, res) => {
   const parsed = listQuerySchema.safeParse(req.query);
   if (!parsed.success) {
@@ -203,6 +205,7 @@ router.get(
 router.get(
   "/:runId",
   authenticate,
+  requireSessionRole(...ANY_MEMBER),
   asyncHandler(async (req: AuthRequest, res) => {
   if (!z.string().uuid().safeParse(req.params.runId).success) {
     res.status(400).json({ error: "Invalid runId" });

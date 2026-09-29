@@ -531,6 +531,88 @@ suite("REST API integration", () => {
     });
   });
 
+  describe("session roles", () => {
+    /** An author with a session holding one file, plus a second account. */
+    const setup = async () => {
+      const owner = await register("reviewer");
+      const other = await register("reviewer");
+      const ownerAuth = { Authorization: `Bearer ${owner.token}` };
+      const otherAuth = { Authorization: `Bearer ${other.token}` };
+      const session = await request(app).post("/api/sessions").set(ownerAuth).send({ title: "Roles" });
+      const sessionId = session.body.id as string;
+      const file = await request(app)
+        .post(`/api/sessions/${sessionId}/files`)
+        .set(ownerAuth)
+        .send({ filePath: "a.ts", content: "const a = 1;\n", language: "typescript" });
+      return { sessionId, fileId: file.body.id as string, ownerAuth, otherAuth };
+    };
+
+    it("keeps someone who has not opened the session link out of it", async () => {
+      const { sessionId, fileId, otherAuth } = await setup();
+      const base = `/api/sessions/${sessionId}`;
+
+      const attempts = await Promise.all([
+        request(app).get(`${base}/files`).set(otherAuth),
+        request(app).get(`${base}/files/${fileId}`).set(otherAuth),
+        request(app).get(`${base}/comments`).set(otherAuth),
+        request(app).post(`${base}/comments`).set(otherAuth).send({ content: "hi" }),
+        request(app).get(`${base}/ai-review`).set(otherAuth),
+        request(app).post(`${base}/ai-review`).set(otherAuth).send({ fileId }),
+      ]);
+
+      for (const res of attempts) {
+        expect(res.status).toBe(403);
+        expect(res.body.error).toMatch(/open the session link/i);
+      }
+    });
+
+    it("lets a reviewer who joined read, comment and review, but not add files", async () => {
+      const { sessionId, fileId, otherAuth } = await setup();
+      const base = `/api/sessions/${sessionId}`;
+
+      // Opening the session is how a teammate joins it.
+      await request(app).get(base).set(otherAuth);
+
+      expect((await request(app).get(`${base}/files`).set(otherAuth)).status).toBe(200);
+      expect(
+        (await request(app).post(`${base}/comments`).set(otherAuth).send({ content: "looks good" })).status
+      ).toBe(201);
+      expect((await request(app).post(`${base}/ai-review`).set(otherAuth).send({ fileId })).status).toBe(202);
+
+      const upload = await request(app)
+        .post(`${base}/files`)
+        .set(otherAuth)
+        .send({ filePath: "b.ts", content: "x", language: "typescript" });
+      expect(upload.status).toBe(403);
+      expect(upload.body.error).toBe("Only the session creator can do that");
+    });
+
+    it("404s on a session that does not exist", async () => {
+      const { otherAuth } = await setup();
+      const res = await request(app)
+        .get("/api/sessions/11111111-1111-1111-1111-111111111111/files")
+        .set(otherAuth);
+      expect(res.status).toBe(404);
+    });
+
+    it("refuses a reply to a comment from a different session", async () => {
+      const first = await setup();
+      const second = await setup();
+
+      const foreign = await request(app)
+        .post(`/api/sessions/${first.sessionId}/comments`)
+        .set(first.ownerAuth)
+        .send({ content: "thread in session one" });
+
+      const reply = await request(app)
+        .post(`/api/sessions/${second.sessionId}/comments`)
+        .set(second.ownerAuth)
+        .send({ content: "hijack", parentId: foreign.body.id });
+
+      expect(reply.status).toBe(404);
+    });
+  });
+
   describe("daily AI review limit", () => {
     /** Pretend this user already started `count` reviews in the last 24 hours. */
     const seedRuns = (sessionId: string, userId: string, count: number) =>
