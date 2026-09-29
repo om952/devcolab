@@ -162,7 +162,7 @@ jobs:
       # Reported for visibility but not blocking: HIGH findings in upstream base
       # images are common and often outside our control.
       - name: Report HIGH and CRITICAL vulnerabilities in ${{ matrix.name }}
-        uses: aquasecurity/trivy-action@0.36.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: devcolab-${{ matrix.name }}:ci
           format: table
@@ -173,7 +173,7 @@ jobs:
       # Blocking: a fixable CRITICAL must not reach main. Runs before the push
       # below, so a failing scan means nothing is published.
       - name: Fail on fixable CRITICAL vulnerabilities in ${{ matrix.name }}
-        uses: aquasecurity/trivy-action@0.36.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: devcolab-${{ matrix.name }}:ci
           format: table
