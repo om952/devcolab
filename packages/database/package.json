@@ -14,10 +14,10 @@
     "db:reset": "../../node_modules/.bin/prisma migrate reset --force --schema=../../prisma/schema.prisma"
   },
   "dependencies": {
-    "@prisma/client": "^5.14.0"
+    "@prisma/client": "^5.14.0",
+    "prisma": "^5.14.0"
   },
   "devDependencies": {
-    "prisma": "^5.14.0",
     "ts-node": "^10.9.2",
     "typescript": "^5.4.5"
   },
