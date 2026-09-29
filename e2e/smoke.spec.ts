@@ -260,6 +260,9 @@ test.describe("access control", () => {
     await row.click();
     await expect(page).toHaveURL(/\/session\//);
 
+    // Everyone registers with the same account role; "Author" must come from
+    // having created this session.
+    await expect(page.getByText(/You:\s*Author/)).toBeVisible();
     await expect(
       page.getByRole("button", { name: /upload or paste code|\+ add/i }).first()
     ).toBeVisible();
@@ -287,6 +290,7 @@ test.describe("access control", () => {
     await register(guestPage);
     await guestPage.goto(sessionUrl);
     await expect(guestPage.getByText("No files yet")).toBeVisible();
+    await expect(guestPage.getByText(/You:\s*Reviewer/)).toBeVisible();
     await expect(
       guestPage.getByRole("button", { name: /upload or paste code|\+ add/i })
     ).toHaveCount(0);

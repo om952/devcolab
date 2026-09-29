@@ -120,6 +120,26 @@ suite("Socket.IO integration", () => {
       expect(joined.participants.map((p: any) => p.id)).toContain(user.id);
     });
 
+    it("labels the creator as author and a joiner as reviewer", async () => {
+      // Both accounts hold the same account-level role; the labels must come
+      // from who created the session, not from the users table.
+      const owner = await register();
+      const guest = await register();
+      const sessionId = await createSession(owner.token);
+
+      const ownerSocket = await connect({ token: owner.token });
+      ownerSocket.emit("session:join", { sessionId });
+      await waitFor(ownerSocket, "session:joined");
+
+      const guestSocket = await connect({ token: guest.token });
+      guestSocket.emit("session:join", { sessionId });
+      const joined = await waitFor<any>(guestSocket, "session:joined");
+
+      const roles = Object.fromEntries(joined.participants.map((p: any) => [p.id, p.role]));
+      expect(roles[owner.user.id]).toBe("author");
+      expect(roles[guest.user.id]).toBe("reviewer");
+    });
+
     it("errors on an unknown session instead of joining", async () => {
       const { token } = await register();
       const socket = await connect({ token });

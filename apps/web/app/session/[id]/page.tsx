@@ -18,6 +18,7 @@ import {
   canAddFiles,
   canTriggerReview,
   roleLabel,
+  sessionRole,
   whyCannotAddFiles,
 } from "../../lib/permissions";
 import "../../styles/prism.css";
@@ -657,6 +658,11 @@ export default function SessionPage() {
   // Send them to login the way the dashboard does — but only once auth has
   // finished restoring, or a hard reload bounces a signed-in user.
   if (!user) return null;
+
+  // Until the session loads, createdById is unknown; fall back to "reviewer",
+  // the least-privileged role, so no author-only control flashes into view.
+  const myRole = sessionRole(user.id, createdById) ?? "reviewer";
+
   if (loading) return <div className="p-8">Loading session...</div>;
 
   const lines = activeFile?.content?.split("\n") || [];
@@ -698,9 +704,9 @@ export default function SessionPage() {
             className="rounded-full bg-slate-800 px-2 py-1 text-xs text-slate-400"
             title="Your role in this session determines what you can do"
           >
-            You: <span className="text-slate-200">{roleLabel(user.role)}</span>
+            You: <span className="text-slate-200">{roleLabel(myRole)}</span>
           </span>
-          {canTriggerReview(user.role) && (
+          {canTriggerReview(myRole) && (
             <>
               <button
                 onClick={triggerAIReview}
@@ -844,7 +850,7 @@ export default function SessionPage() {
           <div className="p-3">
             <div className="flex items-center justify-between mb-2">
             <h3 className="text-xs font-medium uppercase tracking-wider text-slate-500">Files</h3>
-            {/* Mirrors authorize("author") on POST /files — the server rejects
+            {/* Mirrors requireSessionRole("author") on POST /files — the server rejects
                 non-authors regardless, this just avoids offering a dead control. */}
             {canAddFiles(user.id, createdById) ? (
               <button

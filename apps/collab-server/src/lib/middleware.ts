@@ -3,6 +3,8 @@ import { verifyToken } from "./auth";
 
 export interface AuthRequest extends Request {
   user?: { userId: string; role: string };
+  /** Set by requireSessionRole: the caller's role in the session being acted on. */
+  sessionRole?: "author" | "reviewer" | "ai_reviewer";
 }
 
 export function authenticate(req: AuthRequest, res: Response, next: NextFunction) {
@@ -20,20 +22,6 @@ export function authenticate(req: AuthRequest, res: Response, next: NextFunction
   } catch {
     res.status(401).json({ error: "Invalid token" });
   }
-}
-
-export function authorize(...roles: string[]) {
-  return (req: AuthRequest, res: Response, next: NextFunction) => {
-    if (!req.user) {
-      res.status(401).json({ error: "Unauthorized" });
-      return;
-    }
-    if (!roles.includes(req.user.role)) {
-      res.status(403).json({ error: "Forbidden" });
-      return;
-    }
-    next();
-  };
 }
 
 /**

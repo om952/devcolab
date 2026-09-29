@@ -4,6 +4,7 @@ import { prisma } from "@devcolab/database";
 import logger from "../lib/logger";
 import { authenticateSocket } from "../lib/socket-auth";
 import { enrollParticipant } from "../lib/participants";
+import { roleInSession } from "../lib/session-access";
 
 const USER_COLORS = [
   "#10b981", "#3b82f6", "#f59e0b", "#ef4444",
@@ -48,15 +49,18 @@ const replySchema = z.object({
 });
 
 async function listParticipants(sessionId: string) {
-  const participants = await prisma.sessionParticipant.findMany({
-    where: { sessionId, leftAt: null },
-    include: { user: { select: { id: true, name: true, role: true } } },
-  });
+  const [session, participants] = await Promise.all([
+    prisma.session.findUnique({ where: { id: sessionId }, select: { createdById: true } }),
+    prisma.sessionParticipant.findMany({
+      where: { sessionId, leftAt: null },
+      include: { user: { select: { id: true, name: true, role: true } } },
+    }),
+  ]);
 
   return participants.map((p) => ({
     id: p.user.id,
     name: p.user.name,
-    role: p.user.role,
+    role: roleInSession(p.user.id, p.user.role, session?.createdById ?? ""),
     color: getUserColor(p.user.id),
   }));
 }

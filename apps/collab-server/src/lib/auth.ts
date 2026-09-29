@@ -22,7 +22,7 @@ export const loginSchema = z.object({
  * authors AI comments — which made the whole role boundary self-service.
  *
  * Everyone registers as a reviewer. What you may do inside a session comes
- * from owning it, not from a role you picked at signup; see requireSessionCreator.
+ * from owning it, not from a role you picked at signup; see requireSessionRole.
  */
 export const registerSchema = z.object({
   email: z.string().email(),
