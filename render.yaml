@@ -1,0 +1,102 @@
+# Render Blueprint: runs DevColab on Render's free tier.
+# Setup steps are in docs/DEPLOYMENT.md ("Free hosting on Render").
+#
+# Free web services sleep after 15 minutes without traffic and take about a
+# minute to wake. Redis is deliberately absent: the collab-server runs reviews
+# in-process without REDIS_URL, at the cost of an in-flight review being lost
+# if the service restarts.
+#
+# The service names below become the public URLs. If Render reports a name is
+# taken, rename it here AND in every URL that mentions it (CORS_ORIGIN,
+# AI_SERVICE_URL, NEXT_PUBLIC_COLLAB_SERVER_URL, CORS_ORIGINS).
+
+services:
+  - type: web
+    name: devcolab-web
+    runtime: docker
+    plan: free
+    region: singapore
+    dockerfilePath: ./apps/web/Dockerfile
+    dockerContext: .
+    healthCheckPath: /api/health
+    autoDeployTrigger: checksPass
+    buildFilter:
+      paths:
+        - apps/web/**
+        - packages/**
+        - package.json
+        - pnpm-lock.yaml
+        - pnpm-workspace.yaml
+    envVars:
+      # Render passes env vars to `docker build` as build args, which is how
+      # Next inlines NEXT_PUBLIC_* into the client bundle. Changing this value
+      # needs a redeploy (rebuild), not just a restart.
+      - key: NEXT_PUBLIC_COLLAB_SERVER_URL
+        value: https://devcolab-api.onrender.com
+
+  - type: web
+    name: devcolab-api
+    runtime: docker
+    plan: free
+    region: singapore
+    dockerfilePath: ./apps/collab-server/Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    autoDeployTrigger: checksPass
+    buildFilter:
+      paths:
+        - apps/collab-server/**
+        - packages/**
+        - prisma/**
+        - package.json
+        - pnpm-lock.yaml
+        - pnpm-workspace.yaml
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: LOG_LEVEL
+        value: info
+      # Neon's pooled connection string. Asked for once, when the Blueprint is
+      # first created.
+      - key: DATABASE_URL
+        sync: false
+      - key: JWT_SECRET
+        generateValue: true
+      # Generated on devcolab-ai and read from there, so both services always
+      # hold the same key.
+      - key: INTERNAL_API_KEY
+        fromService:
+          type: web
+          name: devcolab-ai
+          envVarKey: INTERNAL_API_KEY
+      - key: CORS_ORIGIN
+        value: https://devcolab-web.onrender.com
+      - key: AI_SERVICE_URL
+        value: https://devcolab-ai.onrender.com
+      - key: TRUST_PROXY
+        value: "1"
+
+  - type: web
+    name: devcolab-ai
+    runtime: docker
+    plan: free
+    region: singapore
+    dockerfilePath: ./apps/ai-service/Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    autoDeployTrigger: checksPass
+    buildFilter:
+      paths:
+        - apps/ai-service/**
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      # The image starts uvicorn on 8000; without this Render expects 10000.
+      - key: PORT
+        value: "8000"
+      - key: INTERNAL_API_KEY
+        generateValue: true
+      - key: CORS_ORIGINS
+        value: https://devcolab-web.onrender.com
+      - key: GOOGLE_API_KEY
+        sync: false
