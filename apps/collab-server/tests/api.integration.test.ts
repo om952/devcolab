@@ -728,6 +728,48 @@ suite("REST API integration", () => {
     });
   });
 
+  describe("per-account login limit", () => {
+    const login = (email: string, password: string) =>
+      request(app).post("/api/auth/login").send({ email, password });
+
+    it("locks an account after repeated wrong passwords, even for the right one", async () => {
+      const { email } = await register("reviewer");
+
+      for (let i = 0; i < env.AUTH_ACCOUNT_RATE_LIMIT_MAX; i++) {
+        expect((await login(email, "wrong-password")).status).toBe(400);
+      }
+
+      const blocked = await login(email, "password123");
+      expect(blocked.status).toBe(429);
+      expect(blocked.body.error).toMatch(/too many failed sign-in attempts/i);
+    });
+
+    it("does not let one account's failures affect another", async () => {
+      const victim = await register("reviewer");
+      const bystander = await register("reviewer");
+
+      for (let i = 0; i < env.AUTH_ACCOUNT_RATE_LIMIT_MAX; i++) await login(victim.email, "wrong-password");
+
+      expect((await login(bystander.email, "password123")).status).toBe(200);
+    });
+
+    it("never counts successful sign-ins", async () => {
+      const { email } = await register("reviewer");
+
+      for (let i = 0; i < env.AUTH_ACCOUNT_RATE_LIMIT_MAX + 3; i++) {
+        expect((await login(email, "password123")).status).toBe(200);
+      }
+    });
+
+    it("treats the email case-insensitively, so changing case cannot dodge it", async () => {
+      const { email } = await register("reviewer");
+
+      for (let i = 0; i < env.AUTH_ACCOUNT_RATE_LIMIT_MAX; i++) await login(email, "wrong-password");
+
+      expect((await login(email.toUpperCase(), "password123")).status).toBe(429);
+    });
+  });
+
   describe("GET /api/auth/me", () => {
     it("returns the caller's identity for a valid token", async () => {
       const { token, user, email } = await register("reviewer");

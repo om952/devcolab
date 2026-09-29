@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { ZodError } from "zod";
+import { loginAccountLimiter } from "../lib/rate-limit";
 import { prisma } from "@devcolab/database";
 import jwt from "jsonwebtoken";
 import type { Response } from "express";
@@ -50,7 +51,7 @@ router.post("/register", async (req, res) => {
   }
 });
 
-router.post("/login", async (req, res) => {
+router.post("/login", loginAccountLimiter, async (req, res) => {
   try {
     const data = loginSchema.parse(req.body);
     const { user, token } = await loginUser(data);
