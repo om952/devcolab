@@ -5,6 +5,38 @@ production. Background and rationale for each piece lives in the main
 [README](../README.md#deploying-to-production) — this is the sequence to
 actually follow, plus the failure modes to expect.
 
+## Free hosting on Render
+
+`render.yaml` deploys all three services on Render's free tier with no server
+or domain of your own. Use this instead of steps 1-6 below; the sections after
+it describe the self-hosted VM path.
+
+1. **Neon**: create a project in AWS Singapore, database `devcolab`. Copy the
+   pooled connection string (`-pooler` in the host) as `DATABASE_URL` and the
+   unpooled one as `DIRECT_URL`.
+2. **Migrations**, from your machine (Neon only, once and after any new
+   migration):
+   ```bash
+   export DATABASE_URL='<pooled url>'
+   export DIRECT_URL='<unpooled url>'
+   pnpm db:migrate
+   ```
+3. **Gemini key**: aistudio.google.com/apikey.
+4. **Render**: New -> Blueprint -> connect the repo, branch `master`. Render
+   asks for `DATABASE_URL` (pooled Neon URL) and `GOOGLE_API_KEY`; everything
+   else is generated or set in the file.
+5. **Verify** once all three are live (the first request to a sleeping service
+   takes about a minute):
+   ```bash
+   curl -s https://devcolab-api.onrender.com/health/ready
+   curl -s https://devcolab-web.onrender.com/api/health
+   ```
+
+Limits to expect: services sleep after 15 minutes idle, and the 750 free
+instance hours are shared across all three. Changing
+`NEXT_PUBLIC_COLLAB_SERVER_URL` needs a redeploy of `devcolab-web`, since it is
+baked in at build time.
+
 ## 0. Decide your database path
 
 Two options — pick one before starting, it changes step 3 and step 6:

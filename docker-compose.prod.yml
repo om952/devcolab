@@ -18,9 +18,12 @@ services:
   postgres:
     ports: !override []
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER must be set}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
-      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB must be set}
+      # Deliberately not `:?`-guarded. Compose interpolates each file before
+      # merging, so a required guard here also fires for Neon deploys, where
+      # this service never starts. Blanking the base file's `devcolab` default
+      # instead makes the container refuse to initialise without a real
+      # password, and preflight rejects a weak one.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
     deploy:
       resources:
         limits:
