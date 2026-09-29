@@ -45,13 +45,13 @@ jobs:
       NODE_ENV: test
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Version comes from `packageManager` in package.json, so CI and the
       # Dockerfiles install with the same pnpm.
       - uses: pnpm/action-setup@v4
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: pnpm
@@ -99,7 +99,7 @@ jobs:
         working-directory: apps/ai-service
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-python@v5
         with:
@@ -139,14 +139,14 @@ jobs:
             dockerfile: apps/web/Dockerfile
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: docker/setup-buildx-action@v3
 
       # Build once, locally, so the scan runs against the exact image that will
       # be published. Scanning a separate build would prove nothing about it.
       - name: Build ${{ matrix.name }}
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: ${{ matrix.dockerfile }}
@@ -162,7 +162,7 @@ jobs:
       # Reported for visibility but not blocking: HIGH findings in upstream base
       # images are common and often outside our control.
       - name: Report HIGH and CRITICAL vulnerabilities in ${{ matrix.name }}
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@0.36.0
         with:
           image-ref: devcolab-${{ matrix.name }}:ci
           format: table
@@ -173,7 +173,7 @@ jobs:
       # Blocking: a fixable CRITICAL must not reach main. Runs before the push
       # below, so a failing scan means nothing is published.
       - name: Fail on fixable CRITICAL vulnerabilities in ${{ matrix.name }}
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@0.36.0
         with:
           image-ref: devcolab-${{ matrix.name }}:ci
           format: table
@@ -193,7 +193,7 @@ jobs:
 
       - name: Push ${{ matrix.name }} to GHCR
         if: github.ref == 'refs/heads/master' && github.event_name == 'push'
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: ${{ matrix.dockerfile }}
@@ -238,13 +238,13 @@ jobs:
       DIRECT_URL: postgresql://devcolab:devcolab@localhost:5433/devcolab
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Version comes from `packageManager` in package.json, so CI and the
       # Dockerfiles install with the same pnpm.
       - uses: pnpm/action-setup@v4
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: pnpm
@@ -268,7 +268,7 @@ jobs:
       - name: Run browser smoke tests
         run: npx playwright test --project=chromium
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: failure()
         with:
           name: playwright-report
@@ -282,7 +282,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Fails without required secrets
         run: |
