@@ -32,6 +32,13 @@ it describe the self-hosted VM path.
    curl -s https://devcolab-web.onrender.com/api/health
    ```
 
+The browser only talks to `devcolab-web`, which proxies `/api` and
+`/socket.io` to `devcolab-api`. That keeps the httpOnly session cookie
+first-party; it is also why the API's `TRUST_PROXY` is 2.
+
+When a release adds a migration, run step 2 against Neon **before** merging:
+Render deploys on merge, and the new code expects the new schema.
+
 Limits to expect: services sleep after 15 minutes idle, and the 750 free
 instance hours are shared across all three. Changing
 `NEXT_PUBLIC_COLLAB_SERVER_URL` needs a redeploy of `devcolab-web`, since it is

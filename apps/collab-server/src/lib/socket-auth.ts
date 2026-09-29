@@ -1,6 +1,5 @@
 import type { Socket } from "socket.io";
-import { prisma } from "@devcolab/database";
-import { verifyToken } from "./auth";
+import { SESSION_COOKIE, readCookie, resolveToken } from "./auth";
 import logger from "./logger";
 
 export interface SocketIdentity {
@@ -9,7 +8,11 @@ export interface SocketIdentity {
   role: string;
 }
 
+/** Browsers send the session cookie; other clients may pass a token instead. */
 function extractToken(socket: Socket): string | null {
+  const fromCookie = readCookie(socket.handshake.headers.cookie, SESSION_COOKIE);
+  if (fromCookie) return fromCookie;
+
   const fromAuth = (socket.handshake.auth as { token?: unknown } | undefined)?.token;
   if (typeof fromAuth === "string" && fromAuth.length > 0) return fromAuth;
 
@@ -23,7 +26,10 @@ function extractToken(socket: Socket): string | null {
 
 /**
  * Socket.IO handshake middleware. Establishes the caller's identity from their
- * JWT so downstream handlers never have to trust client-supplied user ids.
+ * token so downstream handlers never have to trust client-supplied user ids.
+ *
+ * Each socket also joins a per-user room, which is how logout reaches and
+ * closes that user's live connections.
  */
 export async function authenticateSocket(
   socket: Socket,
@@ -36,20 +42,16 @@ export async function authenticateSocket(
   }
 
   try {
-    const payload = verifyToken(token);
-    const user = await prisma.user.findUnique({
-      where: { id: payload.userId },
-      select: { id: true, name: true, role: true },
-    });
-
-    if (!user) {
+    const identity = await resolveToken(token);
+    if (!identity) {
       next(new Error("Unauthorized"));
       return;
     }
 
-    socket.data.userId = user.id;
-    socket.data.userName = user.name;
-    socket.data.role = user.role;
+    socket.data.userId = identity.userId;
+    socket.data.userName = identity.name;
+    socket.data.role = identity.role;
+    socket.join(`user:${identity.userId}`);
     next();
   } catch (err) {
     logger.debug({ err, socketId: socket.id }, "Socket handshake rejected");

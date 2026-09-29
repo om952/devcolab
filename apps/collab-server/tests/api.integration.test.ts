@@ -4,7 +4,7 @@ import type { Express } from "express";
 import bcrypt from "bcryptjs";
 import { prisma } from "@devcolab/database";
 import { env } from "../src/lib/env";
-import { buildTestApp, cleanupUsers, databaseAvailable, uniqueEmail } from "./helpers/app";
+import { buildTestApp, cleanupUsers, databaseAvailable, sessionToken, uniqueEmail } from "./helpers/app";
 
 const hasDb = await databaseAvailable();
 const suite = hasDb ? describe : describe.skip;
@@ -27,7 +27,7 @@ suite("REST API integration", () => {
     const res = await request(app)
       .post("/api/auth/register")
       .send({ email, name: "Test User", password: "password123", role });
-    return { email, token: res.body.token as string, user: res.body.user, res };
+    return { email, token: sessionToken(res), user: res.body.user, res };
   };
 
   beforeAll(() => {
@@ -62,11 +62,17 @@ suite("REST API integration", () => {
   });
 
   describe("auth", () => {
-    it("registers a user and returns a token, never the password", async () => {
+    it("registers a user and sets an httpOnly session cookie, never exposing the token", async () => {
       const { res } = await register("author");
       expect(res.status).toBe(201);
-      expect(res.body.token).toBeTruthy();
       expect(res.body.user.password).toBeUndefined();
+      // Page scripts must never be able to read the token.
+      expect(res.body.token).toBeUndefined();
+
+      const cookie = String(res.headers["set-cookie"]);
+      expect(cookie).toMatch(/devcolab_session=/);
+      expect(cookie).toMatch(/HttpOnly/i);
+      expect(cookie).toMatch(/SameSite=Strict/i);
     });
 
     it("rejects a duplicate email", async () => {
@@ -113,7 +119,7 @@ suite("REST API integration", () => {
 
       const res = await request(app).post("/api/auth/login").send({ email, password: "abc123" });
       expect(res.status).toBe(200);
-      expect(res.body.token).toBeTruthy();
+      expect(sessionToken(res)).toBeTruthy();
     });
 
     it("logs in with correct credentials and rejects a wrong password", async () => {
@@ -679,6 +685,46 @@ suite("REST API integration", () => {
       const res = await request(app).post(`/api/sessions/${sessionId}/ai-review`).set(auth).send({ fileId });
 
       expect(res.status).toBe(202);
+    });
+  });
+
+  describe("cookie sessions and logout", () => {
+    it("authenticates with the cookie alone, no Authorization header", async () => {
+      const { token, user } = await register("reviewer");
+      const res = await request(app).get("/api/auth/me").set("Cookie", `devcolab_session=${token}`);
+      expect(res.status).toBe(200);
+      expect(res.body.id).toBe(user.id);
+    });
+
+    it("revokes every token on logout, not just the one used", async () => {
+      const { email, token } = await register("reviewer");
+      const second = sessionToken(
+        await request(app).post("/api/auth/login").send({ email, password: "password123" })
+      );
+
+      const out = await request(app).post("/api/auth/logout").set("Cookie", `devcolab_session=${token}`);
+      expect(out.status).toBe(204);
+      expect(String(out.headers["set-cookie"])).toMatch(/devcolab_session=;/);
+
+      for (const t of [token, second]) {
+        const me = await request(app).get("/api/auth/me").set("Authorization", `Bearer ${t}`);
+        expect(me.status).toBe(401);
+      }
+    });
+
+    it("clears a dead cookie instead of letting the browser resend it", async () => {
+      const res = await request(app).get("/api/auth/me").set("Cookie", "devcolab_session=not-a-token");
+      expect(res.status).toBe(401);
+      expect(String(res.headers["set-cookie"])).toMatch(/devcolab_session=;/);
+    });
+
+    it("lets a logged-out user sign back in", async () => {
+      const { email, token } = await register("reviewer");
+      await request(app).post("/api/auth/logout").set("Authorization", `Bearer ${token}`);
+
+      const again = await request(app).post("/api/auth/login").send({ email, password: "password123" });
+      const me = await request(app).get("/api/auth/me").set("Authorization", `Bearer ${sessionToken(again)}`);
+      expect(me.status).toBe(200);
     });
   });
 

@@ -4,7 +4,6 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "../lib/auth-context";
 
-const API_URL = process.env.NEXT_PUBLIC_COLLAB_SERVER_URL || "http://localhost:4000";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -25,7 +24,7 @@ export default function LoginPage() {
       const endpoint = isRegister ? "/api/auth/register" : "/api/auth/login";
       const body = isRegister ? { email, password, name } : { email, password };
 
-      const res = await fetch(`${API_URL}${endpoint}`, {
+      const res = await fetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
@@ -34,7 +33,7 @@ export default function LoginPage() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Something went wrong");
 
-      login(data.token, data.user);
+      login(data.user);
       router.push("/dashboard");
     } catch (err: any) {
       setError(err.message);

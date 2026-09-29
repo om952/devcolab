@@ -23,7 +23,6 @@ import {
 } from "../../lib/permissions";
 import "../../styles/prism.css";
 
-const SOCKET_URL = process.env.NEXT_PUBLIC_COLLAB_SERVER_URL || "http://localhost:4000";
 
 interface Participant {
   id: string;
@@ -99,7 +98,7 @@ const AGENT_LABELS: Record<string, string> = {
 export default function SessionPage() {
   const params = useParams();
   const router = useRouter();
-  const { user, token, isLoading: authLoading, apiFetch } = useAuth();
+  const { user, isLoading: authLoading, apiFetch } = useAuth();
   const sessionId = params.id as string;
 
   const [socket, setSocket] = useState<Socket | null>(null);
@@ -132,11 +131,11 @@ export default function SessionPage() {
   const fileRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    if (!user || !token) return;
+    if (!user) return;
 
-    const s = io(SOCKET_URL, {
-      auth: { token },
-    });
+    // Same origin as the page (the API is proxied), so the handshake carries
+    // the session cookie and no token is ever handed to script.
+    const s = io();
 
     s.on("connect", () => {
       setSocketError(null);
@@ -271,7 +270,7 @@ export default function SessionPage() {
       s.emit("session:leave");
       s.disconnect();
     };
-  }, [user, token, sessionId]);
+  }, [user, sessionId]);
 
   useEffect(() => {
     if (authLoading) return;

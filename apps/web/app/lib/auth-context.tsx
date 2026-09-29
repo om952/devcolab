@@ -6,15 +6,18 @@ import {
   useState,
   useEffect,
   useCallback,
-  useRef,
   ReactNode,
 } from "react";
 import { useRouter } from "next/navigation";
 
-const API_URL = process.env.NEXT_PUBLIC_COLLAB_SERVER_URL || "http://localhost:4000";
-
-const TOKEN_KEY = "devcolab_token";
+/**
+ * Cached profile so a reload does not flash the login page while /me is in
+ * flight. Not a credential: the session itself lives in an httpOnly cookie
+ * that page scripts cannot read.
+ */
 const USER_KEY = "devcolab_user";
+/** Where the token used to live; removed so upgraded browsers do not keep it. */
+const LEGACY_TOKEN_KEY = "devcolab_token";
 
 interface User {
   id: string;
@@ -24,7 +27,7 @@ interface User {
 }
 
 /**
- * Thrown by `apiFetch` when the server rejects the token. The redirect to
+ * Thrown by `apiFetch` when the server rejects the session. The redirect to
  * /login has already been started by the time this surfaces, so callers should
  * let it fall through rather than rendering an error for it.
  */
@@ -37,13 +40,14 @@ export class UnauthorizedError extends Error {
 
 interface AuthContextType {
   user: User | null;
-  token: string | null;
-  login: (token: string, user: User) => void;
-  logout: () => void;
+  /** Record who signed in. The server has already set the session cookie. */
+  login: (user: User) => void;
+  /** Revoke the session on the server, then forget it here. */
+  logout: () => Promise<void>;
   isLoading: boolean;
   /**
-   * Authenticated fetch. Takes a path (`/api/sessions`), attaches the bearer
-   * token, and signs the user out on a 401 instead of handing back a body the
+   * Fetch against the API (proxied on this origin, so the session cookie goes
+   * with it). Signs the user out on a 401 instead of handing back a body the
    * caller will misread as data.
    */
   apiFetch: (path: string, init?: RequestInit) => Promise<Response>;
@@ -51,55 +55,38 @@ interface AuthContextType {
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
+function readCachedUser(): User | null {
+  try {
+    const raw = localStorage.getItem(USER_KEY);
+    return raw ? (JSON.parse(raw) as User) : null;
+  } catch {
+    return null;
+  }
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const router = useRouter();
   const [user, setUser] = useState<User | null>(null);
-  const [token, setToken] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
 
-  // apiFetch is used inside effects; reading the token from a ref keeps its
-  // identity stable so it never re-triggers the effects that depend on it.
-  const tokenRef = useRef<string | null>(null);
-
   const clearAuth = useCallback(() => {
-    localStorage.removeItem(TOKEN_KEY);
     localStorage.removeItem(USER_KEY);
-    tokenRef.current = null;
-    setToken(null);
     setUser(null);
   }, []);
 
   useEffect(() => {
-    const storedToken = localStorage.getItem(TOKEN_KEY);
-    const storedUser = localStorage.getItem(USER_KEY);
-
-    if (!storedToken || !storedUser) {
-      setIsLoading(false);
-      return;
-    }
+    localStorage.removeItem(LEGACY_TOKEN_KEY);
 
     // Restore optimistically so a reload does not flash the login page...
-    try {
-      setUser(JSON.parse(storedUser) as User);
-    } catch {
-      clearAuth();
-      setIsLoading(false);
-      return;
-    }
-    tokenRef.current = storedToken;
-    setToken(storedToken);
+    const cached = readCachedUser();
+    if (cached) setUser(cached);
 
-    // ...then ask the server whether the token is actually still good.
-    // localStorage cannot answer that: an expired or revoked token looks
-    // exactly like a valid one, and the user only found out when a request
-    // quietly returned an error body that the page rendered as empty data.
+    // ...then ask the server whether the cookie is still good. Always ask,
+    // cached profile or not: only the server can see the cookie.
     let cancelled = false;
     (async () => {
       try {
-        const res = await fetch(`${API_URL}/api/auth/me`, {
-          headers: { Authorization: `Bearer ${storedToken}` },
-        });
-
+        const res = await fetch("/api/auth/me");
         if (cancelled) return;
 
         if (res.ok) {
@@ -109,8 +96,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         } else if (res.status === 401) {
           clearAuth();
         }
-        // Any other status is the server having a bad day, not a bad token.
-        // Keep the restored session rather than signing everyone out on a blip.
+        // Any other status is the server having a bad day, not a bad session.
+        // Keep the restored user rather than signing everyone out on a blip.
       } catch {
         // Network error — same reasoning: do not sign the user out.
       } finally {
@@ -123,27 +110,24 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     };
   }, [clearAuth]);
 
-  const login = useCallback((newToken: string, newUser: User) => {
-    localStorage.setItem(TOKEN_KEY, newToken);
+  const login = useCallback((newUser: User) => {
     localStorage.setItem(USER_KEY, JSON.stringify(newUser));
-    tokenRef.current = newToken;
-    setToken(newToken);
     setUser(newUser);
   }, []);
 
-  const logout = useCallback(() => {
+  const logout = useCallback(async () => {
+    try {
+      await fetch("/api/auth/logout", { method: "POST" });
+    } catch {
+      // Still forget the user locally; the cookie expires on its own.
+    }
     clearAuth();
-  }, [clearAuth]);
+    router.push("/login");
+  }, [clearAuth, router]);
 
   const apiFetch = useCallback(
     async (path: string, init: RequestInit = {}) => {
-      const bearer = tokenRef.current ?? localStorage.getItem(TOKEN_KEY);
-
-      const headers = new Headers(init.headers);
-      if (bearer) headers.set("Authorization", `Bearer ${bearer}`);
-
-      const url = path.startsWith("http") ? path : `${API_URL}${path}`;
-      const res = await fetch(url, { ...init, headers });
+      const res = await fetch(path, init);
 
       if (res.status === 401) {
         clearAuth();
@@ -157,7 +141,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   );
 
   return (
-    <AuthContext.Provider value={{ user, token, login, logout, isLoading, apiFetch }}>
+    <AuthContext.Provider value={{ user, login, logout, isLoading, apiFetch }}>
       {children}
     </AuthContext.Provider>
   );

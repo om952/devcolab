@@ -26,6 +26,9 @@ model User {
   name      String
   password  String
   role      UserRole @default(reviewer)
+  /// Bumped on logout. Every token carries the version it was issued at, and
+  /// one that no longer matches is rejected, which revokes it everywhere.
+  tokenVersion Int    @default(0) @map("token_version")
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 

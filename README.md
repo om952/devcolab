@@ -177,21 +177,29 @@ openssl rand -hex 32   # use for INTERNAL_API_KEY
 | `REDIS_URL` | collab-server | Enables the Socket.IO adapter and shared rate-limit counters. Required for >1 instance |
 | `TRUST_PROXY` | collab-server | Proxy hops to trust for client IPs. `0` when exposed directly, `1` behind one load balancer |
 | `AUTH_RATE_LIMIT_MAX` / `AUTH_RATE_LIMIT_WINDOW_MS` | collab-server | Login/register attempts allowed per IP per window. Defaults to 20 per 15 min |
-| `NEXT_PUBLIC_COLLAB_SERVER_URL` | web | **Build-time.** Inlined into the client bundle; must be set as a Docker build arg, not at runtime |
+| `NEXT_PUBLIC_COLLAB_SERVER_URL` | web | **Build-time.** Where the web server proxies `/api` and `/socket.io`; compiled into the build, so set it as a Docker build arg, not at runtime |
 | `NEXT_PUBLIC_AI_SERVICE_URL` | web | Build-time, same as above |
 
 > **Note:** DevColab Postgres is exposed on host port **5433** (not 5432) to avoid conflicting with a local PostgreSQL installation.
 
 ### Security notes
 
-- Socket.IO connections are authenticated during the handshake via the JWT.
-  Client-supplied user ids are ignored — identity always comes from the token.
+- The browser holds its session in an httpOnly, `SameSite=Strict` cookie, so
+  page scripts never see the token. The web app proxies `/api` and `/socket.io`
+  to the collab-server, which keeps that cookie first-party on one origin.
+- Logout revokes every token the user holds (each carries a version that
+  logout bumps) and closes their live sockets. Tokens are checked against the
+  database on every request, so revocation is immediate.
+- Socket.IO connections are authenticated during the handshake from the same
+  cookie. Client-supplied user ids are ignored — identity always comes from
+  the token.
 - Auth endpoints are rate limited (20 per 15 min per IP, tunable with
-  `AUTH_RATE_LIMIT_MAX`); AI review is limited to 5 per minute per user. With
-  `REDIS_URL` set, limits are shared across instances.
-- The client asks `GET /api/auth/me` on load rather than trusting what is in
-  `localStorage`, and every authenticated request signs the user out on a 401.
-  A stale token lands on the login page instead of rendering an empty session.
+  `AUTH_RATE_LIMIT_MAX`); AI review is limited to 5 per minute and
+  `AI_REVIEW_DAILY_LIMIT` (default 50) per day per user. With `REDIS_URL` set,
+  the per-minute limits are shared across instances.
+- The client asks `GET /api/auth/me` on load, and every request signs the user
+  out on a 401, so a stale session lands on the login page instead of
+  rendering an empty one.
 - The collab-server refuses to start in production with a default `JWT_SECRET`,
   a missing `INTERNAL_API_KEY`, or a `localhost` CORS origin.
 
