@@ -119,6 +119,30 @@ class TestRateLimitRetry:
         assert "rate limited" in result["agent_errors"][0]["error"]
         assert "429" not in result["agent_errors"][0]["error"]
 
+    async def test_an_overloaded_provider_is_retried_and_then_succeeds(
+        self, fake_llm, sample_code, monkeypatch
+    ):
+        monkeypatch.setattr(A, "RATE_LIMIT_BASE_DELAY_SECONDS", 0.01)
+        llm = fake_llm(overload_on=["bug"], overload_times=2)
+
+        result = await A.run_code_review(sample_code, "python", "f.py")
+
+        assert result["agent_errors"] == [], "a passing 503 spike must not degrade the run"
+        assert llm.overload_hits["bug"] == 2
+        assert len(result["issues"]) == 4
+
+    async def test_persistent_overload_is_reported_in_plain_language(
+        self, fake_llm, sample_code, monkeypatch
+    ):
+        monkeypatch.setattr(A, "AGENT_TIMEOUT_SECONDS", 0.5)
+        monkeypatch.setattr(A, "RATE_LIMIT_BASE_DELAY_SECONDS", 30.0)
+        fake_llm(overload_on=["bug"], overload_times=99)
+
+        result = await A.run_code_review(sample_code, "python", "f.py")
+
+        assert "temporarily overloaded" in result["agent_errors"][0]["error"]
+        assert "503" not in result["agent_errors"][0]["error"]
+
     async def test_a_genuine_error_is_not_retried(self, fake_llm, sample_code, monkeypatch):
         monkeypatch.setattr(A, "RATE_LIMIT_BASE_DELAY_SECONDS", 0.01)
         llm = fake_llm(fail_on=["security"])

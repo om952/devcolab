@@ -26,6 +26,8 @@ class FakeLLM:
         responses=None,
         rate_limit_on=None,
         rate_limit_times: int = 1,
+        overload_on=None,
+        overload_times: int = 1,
     ):
         self.seen: list[str] = []
         self.delay = delay
@@ -37,6 +39,10 @@ class FakeLLM:
         self.rate_limit_on = set(rate_limit_on or [])
         self.rate_limit_times = rate_limit_times
         self.rate_limit_hits: dict[str, int] = {}
+        # Same shape for a provider that is out of capacity (HTTP 503).
+        self.overload_on = set(overload_on or [])
+        self.overload_times = overload_times
+        self.overload_hits: dict[str, int] = {}
 
     @staticmethod
     def _kind(prompt: str) -> str:
@@ -62,6 +68,15 @@ class FakeLLM:
                 self.rate_limit_hits[kind] = hits + 1
                 raise RuntimeError(
                     "Error calling model (RESOURCE_EXHAUSTED): 429 RESOURCE_EXHAUSTED quota exceeded"
+                )
+
+        if kind in self.overload_on:
+            hits = self.overload_hits.get(kind, 0)
+            if hits < self.overload_times:
+                self.overload_hits[kind] = hits + 1
+                raise RuntimeError(
+                    "503 UNAVAILABLE. {'error': {'code': 503, 'message': 'This model is "
+                    "currently experiencing high demand.', 'status': 'UNAVAILABLE'}}"
                 )
 
         if kind in self.fail_on:
