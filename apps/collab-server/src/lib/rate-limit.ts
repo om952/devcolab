@@ -31,6 +31,28 @@ export const authLimiter = rateLimit({
   store: makeStore("rl:auth:"),
 });
 
+/**
+ * Password-guessing protection, keyed by the account being attacked rather
+ * than by address. Only failed attempts count, so a real user who signs in
+ * correctly is never penalised; once an account is over the limit, even the
+ * right password is refused until the window passes.
+ *
+ * The trade-off is that someone can lock a known email out for a while. That is
+ * the cost of not relying on a client address that cannot be trusted here.
+ */
+export const loginAccountLimiter = rateLimit({
+  ...base,
+  windowMs: env.AUTH_RATE_LIMIT_WINDOW_MS,
+  limit: env.AUTH_ACCOUNT_RATE_LIMIT_MAX,
+  store: makeStore("rl:login-account:"),
+  skipSuccessfulRequests: true,
+  keyGenerator: (req) => {
+    const email = (req.body as { email?: unknown } | undefined)?.email;
+    return typeof email === "string" && email ? email.trim().toLowerCase() : (req.ip ?? "unknown");
+  },
+  message: { error: "Too many failed sign-in attempts for this account. Try again later." },
+});
+
 /** LLM calls cost money — key by authenticated user, not IP. */
 export const aiReviewLimiter = rateLimit({
   ...base,

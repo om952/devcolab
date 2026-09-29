@@ -177,6 +177,7 @@ openssl rand -hex 32   # use for INTERNAL_API_KEY
 | `REDIS_URL` | collab-server | Enables the Socket.IO adapter and shared rate-limit counters. Required for >1 instance |
 | `TRUST_PROXY` | collab-server | Proxy hops to trust for client IPs. `0` when exposed directly, `1` behind one load balancer |
 | `AUTH_RATE_LIMIT_MAX` / `AUTH_RATE_LIMIT_WINDOW_MS` | collab-server | Login/register attempts allowed per IP per window. Defaults to 20 per 15 min |
+| `AUTH_ACCOUNT_RATE_LIMIT_MAX` | collab-server | Failed logins allowed per account per window (same window as above). Defaults to 10; does not depend on client IPs |
 | `NEXT_PUBLIC_COLLAB_SERVER_URL` | web | **Build-time.** Where the web server proxies `/api` and `/socket.io`; compiled into the build, so set it as a Docker build arg, not at runtime |
 | `NEXT_PUBLIC_AI_SERVICE_URL` | web | Build-time, same as above |
 
@@ -194,7 +195,10 @@ openssl rand -hex 32   # use for INTERNAL_API_KEY
   cookie. Client-supplied user ids are ignored — identity always comes from
   the token.
 - Auth endpoints are rate limited (20 per 15 min per IP, tunable with
-  `AUTH_RATE_LIMIT_MAX`); AI review is limited to 5 per minute and
+  `AUTH_RATE_LIMIT_MAX`), and failed logins are also limited per account (10 per
+  15 min, `AUTH_ACCOUNT_RATE_LIMIT_MAX`). Behind Render's proxy chain the client
+  IP cannot be identified exactly, so the per-account limit is the one to rely
+  on; AI review is limited to 5 per minute and
   `AI_REVIEW_DAILY_LIMIT` (default 50) per day per user. With `REDIS_URL` set,
   the per-minute limits are shared across instances.
 - The client asks `GET /api/auth/me` on load, and every request signs the user

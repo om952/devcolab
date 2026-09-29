@@ -26,6 +26,23 @@ const nextConfig = {
       ],
     };
   },
+  async headers() {
+    return [
+      {
+        source: "/:path*",
+        headers: [
+          // Never let a browser guess a different type than the one served.
+          { key: "X-Content-Type-Options", value: "nosniff" },
+          // Nobody has a reason to frame the app; this blocks clickjacking.
+          { key: "X-Frame-Options", value: "DENY" },
+          { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
+          { key: "Permissions-Policy", value: "camera=(), microphone=(), geolocation=()" },
+          // HTTPS only, for a year. Render serves the site over TLS.
+          { key: "Strict-Transport-Security", value: "max-age=31536000" },
+        ],
+      },
+    ];
+  },
   // Otherwise Next redirects /socket.io/ to /socket.io and the handshake 404s.
   skipTrailingSlashRedirect: true,
   experimental: {

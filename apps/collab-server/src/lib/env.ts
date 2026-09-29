@@ -52,6 +52,11 @@ const envSchema = z
     // registers a fresh user per case needs far more than either.
     AUTH_RATE_LIMIT_MAX: z.coerce.number().int().min(1).default(20),
     AUTH_RATE_LIMIT_WINDOW_MS: z.coerce.number().int().min(1_000).default(15 * 60 * 1000),
+    // Failed logins allowed per account (email) per window, whatever address
+    // they come from. Deliberately separate from the per-IP limit above: behind
+    // Render's proxies the client address cannot be identified exactly, so
+    // per-IP alone cannot stop someone guessing one account's password.
+    AUTH_ACCOUNT_RATE_LIMIT_MAX: z.coerce.number().int().min(1).default(10),
     MAX_CODE_FILE_BYTES: z.coerce.number().default(512 * 1024),
     // Must exceed ai-service's per-agent timeout (AGENT_TIMEOUT_SECONDS,
     // default 90s). Set below it and this side aborts the stream mid-run and
