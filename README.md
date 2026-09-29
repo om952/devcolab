@@ -25,11 +25,11 @@ Install the following before getting started:
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
 ```
 
-### 2. Node.js 20+
+### 2. Node.js 22+
 
 ```bash
 brew install node
-node --version   # should be >= 18
+node --version   # should be >= 22
 ```
 
 ### 3. pnpm

@@ -1,5 +1,5 @@
-FROM node:20-alpine AS base
-# Prisma's query engine links against OpenSSL, which the bare node:20-alpine
+FROM node:22-alpine AS base
+# Prisma's query engine links against OpenSSL, which the bare node:22-alpine
 # image does not ship. Without it the engine cannot load and every query fails.
 RUN apk add --no-cache openssl \
   && corepack enable && corepack prepare pnpm@9 --activate

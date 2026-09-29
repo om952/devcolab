@@ -17,7 +17,7 @@
     "db:generate": "prisma generate"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "devDependencies": {
     "@playwright/test": "^1.62.0",
