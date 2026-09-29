@@ -29,7 +29,11 @@ RUN pnpm --filter @devcolab/shared-types build
 RUN pnpm --filter @devcolab/database build
 RUN pnpm --filter @devcolab/web build
 
-FROM base AS runner
+# Fresh image rather than `base`: pnpm/corepack are build tools, and npm is not
+# needed to run `node`. npm bundles its own copy of tar, which the scanner
+# flags as CRITICAL, so it is removed rather than shipped unused.
+FROM node:22-alpine AS runner
+RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
 ENV PORT=3000
