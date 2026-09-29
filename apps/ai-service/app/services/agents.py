@@ -58,6 +58,9 @@ SEVERITY_ORDER = {name: index for index, name in enumerate(VALID_SEVERITIES)}
 RATE_LIMIT_MARKERS = ("429", "resource_exhausted", "rate limit", "ratelimit", "quota")
 """Substrings identifying a provider throttle rather than a real failure."""
 
+OVERLOAD_MARKERS = ("503", "unavailable", "overloaded", "high demand")
+"""Substrings identifying a provider that is temporarily out of capacity."""
+
 RATE_LIMIT_BASE_DELAY_SECONDS = 5.0
 
 
@@ -69,6 +72,17 @@ def is_rate_limited(exc: BaseException) -> bool:
     """
     text = str(exc).lower()
     return any(marker in text for marker in RATE_LIMIT_MARKERS)
+
+
+def is_overloaded(exc: BaseException) -> bool:
+    """Whether the provider is temporarily out of capacity (HTTP 503).
+
+    Distinct from a throttle: the limit is not ours, but the remedy is the same,
+    since these spikes clear within seconds and retrying inside the agent's
+    budget usually succeeds where failing outright cannot.
+    """
+    text = str(exc).lower()
+    return any(marker in text for marker in OVERLOAD_MARKERS)
 
 
 class NoLLMConfiguredError(RuntimeError):
@@ -427,18 +441,24 @@ async def run_agent(spec: AgentSpec, state: ReviewState) -> dict:
                 )
                 break
             except Exception as exc:  # noqa: BLE001 - retried or re-raised below
-                # Retry throttling within the agent's existing budget rather
-                # than extending it, so a slow provider cannot stall the run
-                # past the caller's timeout.
+                # Retry throttling and overload within the agent's existing
+                # budget rather than extending it, so a slow provider cannot
+                # stall the run past the caller's timeout.
                 backoff = RATE_LIMIT_BASE_DELAY_SECONDS * (2**attempt)
+                rate_limited = is_rate_limited(exc)
                 if (
-                    not is_rate_limited(exc)
+                    not (rate_limited or is_overloaded(exc))
                     or deadline - loop.time() <= backoff
                 ):
                     raise
 
                 attempt += 1
-                log.warning("agent_rate_limited", attempt=attempt, retry_in_seconds=backoff)
+                log.warning(
+                    "agent_retrying",
+                    reason="rate_limited" if rate_limited else "overloaded",
+                    attempt=attempt,
+                    retry_in_seconds=backoff,
+                )
                 await asyncio.sleep(backoff)
 
         raw_issues = parse_json_response(response_text(response))
@@ -462,11 +482,15 @@ async def run_agent(spec: AgentSpec, state: ReviewState) -> dict:
         log.error("agent_failed", error=str(exc), error_type=type(exc).__name__)
         # Provider throttling is the common failure when reviewing many files;
         # a raw 429 payload tells a reviewer nothing actionable.
-        message = (
-            "rate limited by the LLM provider — retry in a minute or reduce AI_REVIEW_CONCURRENCY"
-            if is_rate_limited(exc)
-            else str(exc)
-        )
+        if is_rate_limited(exc):
+            message = (
+                "rate limited by the LLM provider — retry in a minute or reduce "
+                "AI_REVIEW_CONCURRENCY"
+            )
+        elif is_overloaded(exc):
+            message = "the LLM provider is temporarily overloaded — retry in a minute"
+        else:
+            message = str(exc)
         return {spec.state_key: [], "agent_errors": [{"agent": spec.name, "error": message}]}
 
 
