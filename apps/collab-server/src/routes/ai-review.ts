@@ -3,6 +3,7 @@ import { z } from "zod";
 import { prisma } from "@devcolab/database";
 import { authenticate, authorize, asyncHandler, AuthRequest } from "../lib/middleware";
 import { aiReviewLimiter } from "../lib/rate-limit";
+import { dailyLimitMessage, remainingDailyReviews } from "../lib/ai-quota";
 import { enqueueReview, enqueueReviewBatch } from "../services/ai-review-runner";
 import logger from "../lib/logger";
 
@@ -52,6 +53,11 @@ router.post(
     });
     if (!file || file.sessionId !== sessionId) {
       res.status(404).json({ error: "File not found" });
+      return;
+    }
+
+    if ((await remainingDailyReviews(req.user!.userId)) < 1) {
+      res.status(429).json({ error: dailyLimitMessage() });
       return;
     }
 
@@ -122,8 +128,18 @@ router.post(
       return;
     }
 
-    const selected = valid.slice(0, MAX_BATCH_REVIEW_FILES);
-    const overflow = valid.slice(MAX_BATCH_REVIEW_FILES);
+    const remaining = await remainingDailyReviews(req.user!.userId);
+    if (remaining < 1) {
+      res.status(429).json({ error: dailyLimitMessage() });
+      return;
+    }
+
+    // Whichever is tighter wins: the per-batch ceiling or what is left of the
+    // user's daily allowance. Files past it are reported, not silently dropped.
+    const budget = Math.min(MAX_BATCH_REVIEW_FILES, remaining);
+    const skipReason = budget < MAX_BATCH_REVIEW_FILES ? "over your daily review limit" : "over the per-batch limit";
+    const selected = valid.slice(0, budget);
+    const overflow = valid.slice(budget);
 
     try {
       const result = await enqueueReviewBatch({
@@ -137,7 +153,7 @@ router.post(
         runs: result.runs.map((run) => ({ ...run, filePath: known.get(run.fileId) })),
         queued: result.queued,
         attached: result.attached,
-        skipped: overflow.map((id) => ({ fileId: id, filePath: known.get(id), reason: "over the per-batch limit" })),
+        skipped: overflow.map((id) => ({ fileId: id, filePath: known.get(id), reason: skipReason })),
         limit: MAX_BATCH_REVIEW_FILES,
         message: `Queued ${result.queued} file(s) for review — progress streams over the session socket`,
       });

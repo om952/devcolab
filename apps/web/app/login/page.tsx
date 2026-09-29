@@ -81,6 +81,7 @@ export default function LoginPage() {
             onChange={(e) => setPassword(e.target.value)}
             className="w-full rounded-lg bg-slate-800 px-4 py-3 text-sm outline-none ring-1 ring-slate-700 focus:ring-emerald-500"
             required
+            minLength={isRegister ? 8 : undefined}
           />
 
           {error && <p className="text-sm text-red-400">{error}</p>}

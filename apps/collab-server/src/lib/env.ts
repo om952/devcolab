@@ -61,6 +61,9 @@ const envSchema = z
     // job is retried before it is left as failed.
     AI_REVIEW_CONCURRENCY: z.coerce.number().int().min(1).max(50).default(3),
     AI_REVIEW_JOB_ATTEMPTS: z.coerce.number().int().min(1).max(10).default(2),
+    // Reviews one user may start in any rolling 24 hours. Each review is four
+    // LLM calls, so this bounds what one account can spend on the provider quota.
+    AI_REVIEW_DAILY_LIMIT: z.coerce.number().int().min(1).default(50),
   })
   .superRefine((value, ctx) => {
     if (value.NODE_ENV !== "production") return;
