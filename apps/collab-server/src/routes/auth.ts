@@ -1,9 +1,16 @@
 import { Router } from "express";
+import { ZodError } from "zod";
 import { prisma } from "@devcolab/database";
 import { registerUser, loginUser, registerSchema, loginSchema } from "../lib/auth";
 import { authenticate, asyncHandler, type AuthRequest } from "../lib/middleware";
 
 const router = Router();
+
+/** A ZodError's own message is a JSON dump of every issue; show the first one. */
+function authErrorMessage(err: unknown): string {
+  if (err instanceof ZodError) return err.issues[0]?.message ?? "Invalid input";
+  return err instanceof Error ? err.message : "Something went wrong";
+}
 
 router.post("/register", async (req, res) => {
   try {
@@ -11,7 +18,7 @@ router.post("/register", async (req, res) => {
     const result = await registerUser(data);
     res.status(201).json(result);
   } catch (err: any) {
-    res.status(400).json({ error: err.message });
+    res.status(400).json({ error: authErrorMessage(err) });
   }
 });
 
@@ -21,7 +28,7 @@ router.post("/login", async (req, res) => {
     const result = await loginUser(data);
     res.json(result);
   } catch (err: any) {
-    res.status(400).json({ error: err.message });
+    res.status(400).json({ error: authErrorMessage(err) });
   }
 });
 

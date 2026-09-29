@@ -1,7 +1,9 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import request from "supertest";
 import type { Express } from "express";
+import bcrypt from "bcryptjs";
 import { prisma } from "@devcolab/database";
+import { env } from "../src/lib/env";
 import { buildTestApp, cleanupUsers, databaseAvailable, uniqueEmail } from "./helpers/app";
 
 const hasDb = await databaseAvailable();
@@ -85,6 +87,33 @@ suite("REST API integration", () => {
         .post("/api/auth/register")
         .send({ email: "not-an-email", name: "X", password: "password123" });
       expect(bad.status).toBe(400);
+    });
+
+    it("requires at least 8 characters and says so in plain words", async () => {
+      const short = await request(app)
+        .post("/api/auth/register")
+        .send({ email: uniqueEmail(), name: "Test User", password: "abc1234" });
+      expect(short.status).toBe(400);
+      expect(short.body.error).toBe("Password must be at least 8 characters");
+
+      const email = uniqueEmail();
+      createdEmails.push(email);
+      const ok = await request(app)
+        .post("/api/auth/register")
+        .send({ email, name: "Test User", password: "abcd1234" });
+      expect(ok.status).toBe(201);
+    });
+
+    it("still lets an account created under the old 6-character rule sign in", async () => {
+      const email = uniqueEmail();
+      createdEmails.push(email);
+      await prisma.user.create({
+        data: { email, name: "Legacy", password: await bcrypt.hash("abc123", 10), role: "reviewer" },
+      });
+
+      const res = await request(app).post("/api/auth/login").send({ email, password: "abc123" });
+      expect(res.status).toBe(200);
+      expect(res.body.token).toBeTruthy();
     });
 
     it("logs in with correct credentials and rejects a wrong password", async () => {
@@ -499,6 +528,75 @@ suite("REST API integration", () => {
         expect(second.body.runId).toBe(first.body.runId);
       }
       expect(second.status).toBe(202);
+    });
+  });
+
+  describe("daily AI review limit", () => {
+    /** Pretend this user already started `count` reviews in the last 24 hours. */
+    const seedRuns = (sessionId: string, userId: string, count: number) =>
+      prisma.aIReviewRun.createMany({
+        data: Array.from({ length: count }, () => ({
+          sessionId,
+          triggeredById: userId,
+          status: "completed" as const,
+        })),
+      });
+
+    const setup = async () => {
+      const user = await register("reviewer");
+      const auth = { Authorization: `Bearer ${user.token}` };
+      const session = await request(app).post("/api/sessions").set(auth).send({ title: "Quota" });
+      return { user, auth, sessionId: session.body.id as string };
+    };
+
+    const addFile = async (auth: Record<string, string>, sessionId: string, name: string) => {
+      const res = await request(app)
+        .post(`/api/sessions/${sessionId}/files`)
+        .set(auth)
+        .send({ filePath: name, content: "const x = 1;\n", language: "typescript" });
+      return res.body.id as string;
+    };
+
+    it("refuses a single review once the day's allowance is used", async () => {
+      const { user, auth, sessionId } = await setup();
+      const fileId = await addFile(auth, sessionId, "a.ts");
+      await seedRuns(sessionId, user.user.id, env.AI_REVIEW_DAILY_LIMIT);
+
+      const res = await request(app).post(`/api/sessions/${sessionId}/ai-review`).set(auth).send({ fileId });
+
+      expect(res.status).toBe(429);
+      expect(res.body.error).toMatch(/daily AI review limit/i);
+    });
+
+    it("trims a folder review to what is left instead of refusing it outright", async () => {
+      const { user, auth, sessionId } = await setup();
+      const ids = [
+        await addFile(auth, sessionId, "a.ts"),
+        await addFile(auth, sessionId, "b.ts"),
+        await addFile(auth, sessionId, "c.ts"),
+      ];
+      await seedRuns(sessionId, user.user.id, env.AI_REVIEW_DAILY_LIMIT - 1);
+
+      const res = await request(app)
+        .post(`/api/sessions/${sessionId}/ai-review/batch`)
+        .set(auth)
+        .send({ fileIds: ids });
+
+      expect(res.status).toBe(202);
+      expect(res.body.runs).toHaveLength(1);
+      expect(res.body.skipped).toHaveLength(2);
+      expect(res.body.skipped[0].reason).toBe("over your daily review limit");
+    });
+
+    it("does not count another user's reviews against you", async () => {
+      const other = await setup();
+      await seedRuns(other.sessionId, other.user.user.id, env.AI_REVIEW_DAILY_LIMIT);
+
+      const { auth, sessionId } = await setup();
+      const fileId = await addFile(auth, sessionId, "a.ts");
+      const res = await request(app).post(`/api/sessions/${sessionId}/ai-review`).set(auth).send({ fileId });
+
+      expect(res.status).toBe(202);
     });
   });
 

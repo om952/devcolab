@@ -26,8 +26,10 @@ export const loginSchema = z.object({
  */
 export const registerSchema = z.object({
   email: z.string().email(),
-  name: z.string().min(2),
-  password: z.string().min(6),
+  name: z.string().min(2, "Name must be at least 2 characters"),
+  // Login deliberately keeps its lower bound: accounts created under the old
+  // 6-character rule must still be able to sign in.
+  password: z.string().min(8, "Password must be at least 8 characters"),
 });
 
 export type LoginInput = z.infer<typeof loginSchema>;
