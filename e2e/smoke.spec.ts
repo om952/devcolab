@@ -1,4 +1,16 @@
-import { test, expect, type Page } from "@playwright/test";
+import { test, expect, type BrowserContext, type Page } from "@playwright/test";
+
+/** Correctly shaped, wrongly signed. */
+const FORGED_TOKEN =
+  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9." +
+  "eyJ1c2VySWQiOiJnb25lIiwicm9sZSI6InJldmlld2VyIn0.not-a-real-signature";
+
+/** The httpOnly session cookie, read from the browser context (scripts cannot). */
+async function sessionCookie(context: BrowserContext) {
+  const cookie = (await context.cookies()).find((c) => c.name === "devcolab_session");
+  if (!cookie) throw new Error("no session cookie");
+  return cookie;
+}
 
 /** Unique per run so repeated runs never collide on the email unique index. */
 function newUser() {
@@ -96,7 +108,7 @@ test.describe("auth", () => {
   });
 
   test("stays signed in when the dashboard is loaded directly", async ({ page }) => {
-    // Auth restores from localStorage asynchronously; a hard load must wait
+    // Auth is confirmed with the server asynchronously; a hard load must wait
     // for that rather than redirecting to login.
     await register(page);
     await page.goto("/dashboard");
@@ -105,44 +117,52 @@ test.describe("auth", () => {
     await expect(page.getByRole("heading", { name: /dashboard/i })).toBeVisible();
   });
 
-  test("a stale token is bounced to login, not shown an empty dashboard", async ({ page }) => {
+  test("a stale session is bounced to login, not shown an empty dashboard", async ({ page, context }) => {
     await register(page);
     await expect(page).toHaveURL(/\/dashboard/);
 
     // Correctly shaped, wrongly signed — indistinguishable from a good token
     // until the server is asked, which is exactly the point of /api/auth/me.
-    await page.evaluate(() => {
-      localStorage.setItem(
-        "devcolab_token",
-        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9." +
-          "eyJ1c2VySWQiOiJnb25lIiwicm9sZSI6InJldmlld2VyIn0.not-a-real-signature"
-      );
-    });
+    await context.addCookies([{ ...(await sessionCookie(context)), value: FORGED_TOKEN }]);
 
     await page.goto("/dashboard");
     await expect(page).toHaveURL(/\/login/);
-    // The dead session must not survive the bounce.
-    expect(await page.evaluate(() => localStorage.getItem("devcolab_token"))).toBeNull();
+    // The server clears the dead cookie rather than letting it be resent.
+    expect(await sessionCookie(context).catch(() => null)).toBeNull();
   });
 
-  test("a stale token on a session link goes to login, not an empty session", async ({ page }) => {
+  test("a stale session on a session link goes to login, not an empty session", async ({ page, context }) => {
     await register(page);
     const { row } = await createSession(page, "Stale Token");
     await row.click();
     await expect(page).toHaveURL(/\/session\//);
     const sessionUrl = page.url();
 
-    await page.evaluate(() => {
-      localStorage.setItem(
-        "devcolab_token",
-        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9." +
-          "eyJ1c2VySWQiOiJnb25lIiwicm9sZSI6InJldmlld2VyIn0.not-a-real-signature"
-      );
-    });
+    await context.addCookies([{ ...(await sessionCookie(context)), value: FORGED_TOKEN }]);
 
     // This previously rendered a session that looked real but had no files and
     // no comments, with nothing telling the user to sign in again.
     await page.goto(sessionUrl);
+    await expect(page).toHaveURL(/\/login/);
+  });
+
+  test("the token is never readable by page scripts", async ({ page, context }) => {
+    await register(page);
+    expect((await sessionCookie(context)).httpOnly).toBe(true);
+    expect(await page.evaluate(() => document.cookie)).not.toContain("devcolab_session");
+    expect(await page.evaluate(() => JSON.stringify(localStorage))).not.toMatch(/eyJ/);
+  });
+
+  test("signing out revokes the session on the server, not just in this tab", async ({ page, context }) => {
+    await register(page);
+    const stolen = await sessionCookie(context);
+
+    await page.getByRole("button", { name: /logout/i }).click();
+    await expect(page).toHaveURL(/\/login/);
+
+    // Replaying the old cookie must not get back in.
+    await context.addCookies([stolen]);
+    await page.goto("/dashboard");
     await expect(page).toHaveURL(/\/login/);
   });
 

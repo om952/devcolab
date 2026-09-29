@@ -63,6 +63,18 @@ export async function databaseAvailable(): Promise<boolean> {
   }
 }
 
+/**
+ * The session token from a login/register response. It arrives only as the
+ * httpOnly cookie; returning it in the body would hand it to page scripts.
+ */
+export function sessionToken(res: { headers: Record<string, unknown> }): string {
+  const setCookie = res.headers["set-cookie"];
+  const cookies = Array.isArray(setCookie) ? setCookie : setCookie ? [String(setCookie)] : [];
+  const match = cookies.map((c) => /^devcolab_session=([^;]+)/.exec(c)).find(Boolean);
+  if (!match) throw new Error("response did not set the session cookie");
+  return decodeURIComponent(match[1]);
+}
+
 let counter = 0;
 export const uniqueEmail = () => `test-${Date.now()}-${counter++}@example.com`;
 

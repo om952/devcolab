@@ -1,10 +1,37 @@
 import { Router } from "express";
 import { ZodError } from "zod";
 import { prisma } from "@devcolab/database";
-import { registerUser, loginUser, registerSchema, loginSchema } from "../lib/auth";
-import { authenticate, asyncHandler, type AuthRequest } from "../lib/middleware";
+import jwt from "jsonwebtoken";
+import type { Response } from "express";
+import type { Server } from "socket.io";
+import {
+  registerUser,
+  loginUser,
+  registerSchema,
+  loginSchema,
+  revokeTokens,
+  resolveToken,
+  SESSION_COOKIE,
+} from "../lib/auth";
+import {
+  authenticate,
+  asyncHandler,
+  sessionCookieOptions,
+  tokenFromRequest,
+  type AuthRequest,
+} from "../lib/middleware";
 
 const router = Router();
+
+/**
+ * Hand the token to the browser as an httpOnly cookie that lives exactly as
+ * long as the token itself. It is deliberately not in the response body:
+ * anything page scripts can read, an injected script can steal.
+ */
+function setSessionCookie(res: Response, token: string) {
+  const exp = (jwt.decode(token) as { exp?: number } | null)?.exp;
+  res.cookie(SESSION_COOKIE, token, sessionCookieOptions(exp ? exp * 1000 - Date.now() : undefined));
+}
 
 /** A ZodError's own message is a JSON dump of every issue; show the first one. */
 function authErrorMessage(err: unknown): string {
@@ -15,8 +42,9 @@ function authErrorMessage(err: unknown): string {
 router.post("/register", async (req, res) => {
   try {
     const data = registerSchema.parse(req.body);
-    const result = await registerUser(data);
-    res.status(201).json(result);
+    const { user, token } = await registerUser(data);
+    setSessionCookie(res, token);
+    res.status(201).json({ user });
   } catch (err: any) {
     res.status(400).json({ error: authErrorMessage(err) });
   }
@@ -25,12 +53,37 @@ router.post("/register", async (req, res) => {
 router.post("/login", async (req, res) => {
   try {
     const data = loginSchema.parse(req.body);
-    const result = await loginUser(data);
-    res.json(result);
+    const { user, token } = await loginUser(data);
+    setSessionCookie(res, token);
+    res.json({ user });
   } catch (err: any) {
     res.status(400).json({ error: authErrorMessage(err) });
   }
 });
+
+/**
+ * Sign out everywhere: revoke every token this user holds, drop their live
+ * sockets, and clear the cookie.
+ *
+ * Does not require a valid token, so a browser holding a dead cookie can still
+ * be told to forget it.
+ */
+router.post(
+  "/logout",
+  asyncHandler(async (req, res) => {
+    const { token } = tokenFromRequest(req);
+    const identity = token ? await resolveToken(token) : null;
+
+    if (identity) {
+      await revokeTokens(identity.userId);
+      const io = req.app.get("io") as Server | undefined;
+      io?.in(`user:${identity.userId}`).disconnectSockets(true);
+    }
+
+    res.clearCookie(SESSION_COOKIE, sessionCookieOptions());
+    res.status(204).send();
+  })
+);
 
 /**
  * Who is this token? The client stores its session in localStorage, which says

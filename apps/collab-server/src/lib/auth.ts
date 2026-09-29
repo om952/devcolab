@@ -7,8 +7,19 @@ import { env } from "./env";
 const JWT_SECRET = env.JWT_SECRET;
 const JWT_EXPIRES_IN = env.JWT_EXPIRES_IN as jwt.SignOptions["expiresIn"];
 
-function issueToken(userId: string, role: string): string {
-  return jwt.sign({ userId, role }, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
+/** Name of the httpOnly cookie the browser holds its session token in. */
+export const SESSION_COOKIE = "devcolab_session";
+
+export interface TokenClaims {
+  userId: string;
+  role: string;
+  /** The user's tokenVersion when this token was issued. */
+  tv: number;
+}
+
+function issueToken(userId: string, role: string, tokenVersion: number): string {
+  const claims: TokenClaims = { userId, role, tv: tokenVersion };
+  return jwt.sign(claims, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
 }
 
 export const loginSchema = z.object({
@@ -50,7 +61,7 @@ export async function registerUser(data: RegisterInput) {
     },
   });
 
-  const token = issueToken(user.id, user.role);
+  const token = issueToken(user.id, user.role, user.tokenVersion);
   return { user: { id: user.id, email: user.email, name: user.name, role: user.role }, token };
 }
 
@@ -61,10 +72,64 @@ export async function loginUser(data: LoginInput) {
   const valid = await bcrypt.compare(data.password, user.password);
   if (!valid) throw new Error("Invalid credentials");
 
-  const token = issueToken(user.id, user.role);
+  const token = issueToken(user.id, user.role, user.tokenVersion);
   return { user: { id: user.id, email: user.email, name: user.name, role: user.role }, token };
 }
 
-export function verifyToken(token: string): { userId: string; role: string } {
-  return jwt.verify(token, JWT_SECRET) as { userId: string; role: string };
+export function verifyToken(token: string): TokenClaims {
+  return jwt.verify(token, JWT_SECRET) as TokenClaims;
+}
+
+/**
+ * Who a token belongs to, or null if it is invalid, expired, revoked, or for a
+ * deleted account.
+ *
+ * Checks the database on every call: a signature alone cannot say whether the
+ * user has since logged out, and this is what makes logout take effect
+ * immediately rather than whenever the token expires.
+ */
+export async function resolveToken(
+  token: string
+): Promise<{ userId: string; role: string; name: string } | null> {
+  let claims: TokenClaims;
+  try {
+    claims = verifyToken(token);
+  } catch {
+    return null;
+  }
+
+  const user = await prisma.user.findUnique({
+    where: { id: claims.userId },
+    select: { id: true, role: true, name: true, tokenVersion: true },
+  });
+  // Tokens from before versioning carry no `tv` and are rejected with the rest.
+  if (!user || claims.tv !== user.tokenVersion) return null;
+
+  return { userId: user.id, role: user.role, name: user.name };
+}
+
+/** Invalidate every token issued to this user so far. */
+export async function revokeTokens(userId: string): Promise<void> {
+  await prisma.user.update({
+    where: { id: userId },
+    data: { tokenVersion: { increment: 1 } },
+  });
+}
+
+/** Read one cookie from a raw Cookie header, without pulling in a parser. */
+export function readCookie(header: string | undefined, name: string): string | null {
+  if (!header) return null;
+  for (const part of header.split(";")) {
+    const eq = part.indexOf("=");
+    if (eq === -1) continue;
+    if (part.slice(0, eq).trim() === name) {
+      const value = part.slice(eq + 1).trim();
+      try {
+        return decodeURIComponent(value);
+      } catch {
+        return value;
+      }
+    }
+  }
+  return null;
 }

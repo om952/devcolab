@@ -5,7 +5,7 @@ import { io as ioClient, type Socket } from "socket.io-client";
 import type { Server as HttpServer } from "http";
 import type { Express } from "express";
 import { prisma } from "@devcolab/database";
-import { buildTestApp, cleanupUsers, databaseAvailable, listen, uniqueEmail } from "./helpers/app";
+import { buildTestApp, cleanupUsers, databaseAvailable, listen, sessionToken, uniqueEmail } from "./helpers/app";
 
 const hasDb = await databaseAvailable();
 const suite = hasDb ? describe : describe.skip;
@@ -20,9 +20,9 @@ suite("Socket.IO integration", () => {
   const createdEmails: string[] = [];
   const sockets: Socket[] = [];
 
-  const connect = (auth: Record<string, unknown>): Promise<Socket> =>
+  const connect = (auth: Record<string, unknown>, extraHeaders?: Record<string, string>): Promise<Socket> =>
     new Promise((resolve, reject) => {
-      const socket = ioClient(url, { auth, reconnection: false, transports: ["websocket"] });
+      const socket = ioClient(url, { auth, extraHeaders, reconnection: false, transports: ["websocket"] });
       sockets.push(socket);
       socket.on("connect", () => resolve(socket));
       socket.on("connect_error", (err) => reject(err));
@@ -44,7 +44,7 @@ suite("Socket.IO integration", () => {
     const res = await request(app)
       .post("/api/auth/register")
       .send({ email, name: `User ${createdEmails.length}`, password: "password123", role });
-    return { token: res.body.token as string, user: res.body.user };
+    return { token: sessionToken(res), user: res.body.user };
   };
 
   const createSession = async (token: string) => {
@@ -98,6 +98,24 @@ suite("Socket.IO integration", () => {
         expiresIn: "-1s",
       });
       await expect(connect({ token: expired })).rejects.toThrow(/Unauthorized/);
+    });
+
+    it("accepts the session cookie from the handshake headers", async () => {
+      const { token } = await register();
+      const socket = await connect({}, { Cookie: `devcolab_session=${token}` });
+      expect(socket.connected).toBe(true);
+    });
+
+    it("closes a user's live sockets when they log out", async () => {
+      const { token } = await register();
+      const socket = await connect({ token });
+
+      const closed = new Promise<string>((resolve) => socket.on("disconnect", resolve));
+      await request(app).post("/api/auth/logout").set("Authorization", `Bearer ${token}`);
+
+      expect(await closed).toBe("io server disconnect");
+      // And the revoked token cannot reconnect.
+      await expect(connect({ token })).rejects.toThrow(/Unauthorized/);
     });
 
     it("accepts a valid token", async () => {

@@ -1,5 +1,6 @@
-import { Request, Response, NextFunction } from "express";
-import { verifyToken } from "./auth";
+import { Request, Response, NextFunction, CookieOptions } from "express";
+import { SESSION_COOKIE, readCookie, resolveToken } from "./auth";
+import { env } from "./env";
 
 export interface AuthRequest extends Request {
   user?: { userId: string; role: string };
@@ -7,21 +8,54 @@ export interface AuthRequest extends Request {
   sessionRole?: "author" | "reviewer" | "ai_reviewer";
 }
 
+/**
+ * The browser authenticates with an httpOnly cookie, so page scripts never see
+ * the token. SameSite=Strict keeps other sites from making requests that carry
+ * it, which is what stands in for CSRF tokens here: the web app proxies the
+ * API onto its own origin, so every legitimate request is same-site.
+ *
+ * Secure only in production, so plain-http local development still works.
+ */
+export function sessionCookieOptions(maxAgeMs?: number): CookieOptions {
+  return {
+    httpOnly: true,
+    sameSite: "strict",
+    secure: env.NODE_ENV === "production",
+    path: "/",
+    ...(maxAgeMs ? { maxAge: maxAgeMs } : {}),
+  };
+}
+
+/** Cookie first (browsers), then a Bearer header (scripts, tests, other clients). */
+export function tokenFromRequest(req: Request): { token: string | null; fromCookie: boolean } {
+  const cookie = readCookie(req.headers.cookie, SESSION_COOKIE);
+  if (cookie) return { token: cookie, fromCookie: true };
+
+  const header = req.headers.authorization;
+  if (header?.startsWith("Bearer ")) return { token: header.slice("Bearer ".length), fromCookie: false };
+
+  return { token: null, fromCookie: false };
+}
+
 export function authenticate(req: AuthRequest, res: Response, next: NextFunction) {
-  const authHeader = req.headers.authorization;
-  if (!authHeader?.startsWith("Bearer ")) {
+  const { token, fromCookie } = tokenFromRequest(req);
+  if (!token) {
     res.status(401).json({ error: "Unauthorized" });
     return;
   }
 
-  try {
-    const token = authHeader.split(" ")[1];
-    const payload = verifyToken(token);
-    req.user = payload;
-    next();
-  } catch {
-    res.status(401).json({ error: "Invalid token" });
-  }
+  resolveToken(token)
+    .then((identity) => {
+      if (!identity) {
+        // A dead cookie would otherwise be resent on every request.
+        if (fromCookie) res.clearCookie(SESSION_COOKIE, sessionCookieOptions());
+        res.status(401).json({ error: "Invalid token" });
+        return;
+      }
+      req.user = { userId: identity.userId, role: identity.role };
+      next();
+    })
+    .catch(next);
 }
 
 /**
