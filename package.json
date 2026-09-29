@@ -1,6 +1,7 @@
 {
   "name": "devcolab",
   "private": true,
+  "packageManager": "pnpm@9.15.9",
   "scripts": {
     "dev:web": "pnpm --filter @devcolab/web dev",
     "dev:collab": "pnpm --filter @devcolab/collab-server dev",
@@ -16,7 +17,7 @@
     "db:generate": "prisma generate"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   },
   "devDependencies": {
     "@playwright/test": "^1.62.0",

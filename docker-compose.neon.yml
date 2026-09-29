@@ -9,8 +9,7 @@
 
 services:
   # Never started: the "disabled" profile is never activated by `docker
-  # compose up`. Still present so POSTGRES_USER/PASSWORD/DB guards in the base
-  # file don't need to be touched.
+  # compose up`. Still defined because the base and prod files configure it.
   postgres:
     profiles: ["disabled"]
 
