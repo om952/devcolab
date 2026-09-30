@@ -1,5 +1,6 @@
 """Tests for the LangGraph multi-agent pipeline."""
 
+import asyncio
 import time
 
 import pytest
@@ -289,3 +290,79 @@ class TestInputHandling:
     def test_small_files_are_untouched(self):
         code = "print(1)\n"
         assert A.initial_state(code, "python", "s.py")["code"] == code
+
+
+class TestPerRequestCredentials:
+    def test_no_client_is_built_without_a_key(self):
+        with pytest.raises(A.NoLLMConfiguredError, match="key"):
+            A.get_llm()
+
+    def test_the_client_is_built_from_the_callers_key_and_provider(self, monkeypatch):
+        built = {}
+
+        class FakeGemini:
+            def __init__(self, **kwargs):
+                built["gemini"] = kwargs
+
+        class FakeGroq:
+            def __init__(self, **kwargs):
+                built["groq"] = kwargs
+
+        monkeypatch.setattr(A, "ChatGoogleGenerativeAI", FakeGemini, raising=False)
+        monkeypatch.setattr(A, "ChatGroq", FakeGroq, raising=False)
+        monkeypatch.setattr(A, "GEMINI_AVAILABLE", True)
+        monkeypatch.setattr(A, "GROQ_AVAILABLE", True)
+
+        token = A.use_credential(A.LLMCredential("gemini", "gem-key"))
+        try:
+            A.get_llm()
+        finally:
+            A.release_credential(token)
+        token = A.use_credential(A.LLMCredential("groq", "groq-key"))
+        try:
+            A.get_llm()
+        finally:
+            A.release_credential(token)
+
+        assert built["gemini"]["google_api_key"] == "gem-key"
+        assert built["groq"]["api_key"] == "groq-key"
+
+    async def test_concurrent_reviews_never_see_each_others_key(self, monkeypatch):
+        async def review_as(key: str):
+            token = A.use_credential(A.LLMCredential("gemini", key))
+            try:
+                await asyncio.sleep(0.01)  # let the other request run in between
+                return A._credential.get().api_key
+            finally:
+                A.release_credential(token)
+
+        assert await asyncio.gather(review_as("alice"), review_as("bob")) == ["alice", "bob"]
+
+    def test_the_key_stays_out_of_reprs_and_scrubbed_text(self):
+        credential = A.LLMCredential("gemini", "super-secret-key")
+        assert "super-secret-key" not in repr(credential)
+
+        token = A.use_credential(credential)
+        try:
+            assert "super-secret-key" not in A.scrub("bad request: key=super-secret-key")
+        finally:
+            A.release_credential(token)
+
+    async def test_a_provider_error_that_echoes_the_key_is_redacted(
+        self, monkeypatch, sample_code
+    ):
+        class Echo:
+            async def ainvoke(self, _messages):
+                raise RuntimeError("API key not valid: super-secret-key")
+
+        monkeypatch.setattr(A, "get_llm", lambda: Echo())
+
+        token = A.use_credential(A.LLMCredential("gemini", "super-secret-key"))
+        try:
+            result = await A.run_code_review(sample_code, "python", "f.py")
+        finally:
+            A.release_credential(token)
+
+        errors = " ".join(e["error"] for e in result["agent_errors"])
+        assert "super-secret-key" not in errors
+        assert "[redacted]" in errors

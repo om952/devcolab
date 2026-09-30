@@ -34,6 +34,9 @@ const collabEnv = {
   // Point at a dead AI service so reviews take the deterministic heuristic
   // path — an e2e smoke test must not depend on a live LLM.
   AI_SERVICE_URL: "http://127.0.0.1:59997",
+  // Accept any LLM key without asking Google or Groq; the suite must not depend
+  // on a real provider or a real key. The server refuses this in production.
+  LLM_KEY_CHECK: "skip",
 };
 
 export default defineConfig({

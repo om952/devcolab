@@ -89,6 +89,11 @@ describe("env validation", () => {
       expect(messagesFor(result, "CORS_ORIGIN")[0]).toMatch(/localhost/);
     });
 
+    it("refuses to skip LLM key checks", () => {
+      const result = parseEnv({ ...PROD, LLM_KEY_CHECK: "skip" } as any);
+      expect(messagesFor(result, "LLM_KEY_CHECK")[0]).toMatch(/production/);
+    });
+
     it("accepts a fully valid production config", () => {
       expect(parseEnv(PROD as any).success).toBe(true);
     });

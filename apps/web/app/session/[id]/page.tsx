@@ -14,6 +14,7 @@ import {
   type SkipReason,
   type UploadFile,
 } from "../../lib/file-upload";
+import LlmKeyPanel, { type LlmKeyStatus } from "../../components/LlmKeyPanel";
 import {
   canAddFiles,
   canTriggerReview,
@@ -128,6 +129,17 @@ export default function SessionPage() {
   const [runs, setRuns] = useState<Record<string, RunProgress>>({});
   /** How many files the current review covers; >1 renders the folder summary. */
   const [reviewScope, setReviewScope] = useState(0);
+  // The user's own LLM key: whether one is set, never the key itself.
+  const [keyStatus, setKeyStatus] = useState<LlmKeyStatus | null>(null);
+  const [keyPanelOpen, setKeyPanelOpen] = useState(false);
+  const [keyPrompt, setKeyPrompt] = useState<string | null>(null);
+
+  /** Reviews cannot run without the user's key; ask for it instead of failing. */
+  const askForKey = (message: string) => {
+    setKeyStatus({ configured: false });
+    setKeyPrompt(message);
+    setKeyPanelOpen(true);
+  };
   const fileRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -254,7 +266,10 @@ export default function SessionPage() {
       }
     );
 
-    s.on("ai:review_failed", (d: { runId: string }) => {
+    s.on("ai:review_failed", (d: { runId: string; code?: string; error?: string }) => {
+      // The key vanished between queueing and running (logout, expiry, or a
+      // server restart); the fix is to add it again, so say so.
+      if (d.code === "llm_key_required") askForKey(d.error ?? "Add your AI key again to re-run the review.");
       setRuns((prev) => {
         const run = prev[d.runId];
         if (!run) return prev;
@@ -265,6 +280,10 @@ export default function SessionPage() {
     setSocket(s);
 
     fetchSessionData();
+    apiFetch("/api/llm-key")
+      .then((res) => (res.ok ? res.json() : null))
+      .then((status) => status && setKeyStatus(status))
+      .catch(() => undefined);
 
     return () => {
       s.emit("session:leave");
@@ -355,6 +374,12 @@ export default function SessionPage() {
       });
 
       const data = await res.json().catch(() => ({}));
+      if (res.status === 428 && data.code === "llm_key_required") {
+        askForKey(data.error);
+        setAiLoading(false);
+        setReviewScope(0);
+        return null;
+      }
       if (!res.ok) throw new Error(data.error || "Could not start review");
       return data;
     } catch (err: any) {
@@ -707,6 +732,16 @@ export default function SessionPage() {
           </span>
           {canTriggerReview(myRole) && (
             <>
+              <LlmKeyPanel
+                open={keyPanelOpen}
+                onOpenChange={(open) => {
+                  setKeyPanelOpen(open);
+                  if (!open) setKeyPrompt(null);
+                }}
+                status={keyStatus}
+                onStatusChange={setKeyStatus}
+                prompt={keyPrompt}
+              />
               <button
                 onClick={triggerAIReview}
                 disabled={aiLoading || !activeFile}

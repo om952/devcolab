@@ -12,6 +12,18 @@ async function sessionCookie(context: BrowserContext) {
   return cookie;
 }
 
+/**
+ * Add an LLM key through the session page. The e2e collab-server runs with
+ * LLM_KEY_CHECK=skip, so no provider is called.
+ */
+async function addLlmKey(page: Page, key = "gsk_e2e_test_key_123") {
+  await page.getByRole("button", { name: /add ai key/i }).click();
+  await page.getByRole("button", { name: /^groq$/i }).click();
+  await page.getByPlaceholder(/groq api key/i).fill(key);
+  await page.getByRole("button", { name: /save key/i }).click();
+  await expect(page.getByRole("button", { name: /using your groq key/i })).toBeVisible();
+}
+
 /** Unique per run so repeated runs never collide on the email unique index. */
 function newUser() {
   const stamp = `${Date.now()}-${Math.floor(Math.random() * 1e4)}`;
@@ -211,6 +223,7 @@ test.describe("review session", () => {
     );
     await expect(page.getByText("vuln.ts").first()).toBeVisible();
 
+    await addLlmKey(page);
     await page.getByRole("button", { name: /^ai review$/i }).click();
 
     // The AI service is intentionally unreachable here, so the run must
@@ -220,6 +233,48 @@ test.describe("review session", () => {
 
     // Findings land as comments in the sidebar.
     await expect(page.getByText(/hardcoded secret/i).first()).toBeVisible();
+  });
+});
+
+test.describe("bring your own LLM key", () => {
+  test("a review without a key asks for one instead of failing", async ({ page }) => {
+    await register(page);
+    const { row } = await createSession(page, "No Key");
+    await row.click();
+    await addFile(page, "a.ts", "const a = 1;\n");
+
+    await expect(page.getByRole("button", { name: /add ai key/i })).toBeVisible();
+    await page.getByRole("button", { name: /^ai review$/i }).click();
+
+    await expect(page.getByRole("dialog", { name: /your ai key/i })).toBeVisible();
+    await expect(page.getByText(/add your gemini or groq api key/i)).toBeVisible();
+  });
+
+  test("a saved key is never shown back, and logout forgets it", async ({ page }) => {
+    const user = await register(page);
+    const { row } = await createSession(page, "Key Privacy");
+    await row.click();
+    await expect(page).toHaveURL(/\/session\//);
+    const sessionUrl = page.url();
+
+    await addLlmKey(page, "gsk_e2e_secret_value_42");
+    await expect(page.getByRole("button", { name: /using your groq key/i })).toBeVisible();
+    expect(await page.content()).not.toContain("gsk_e2e_secret_value_42");
+
+    // Survives a reload: it lives on the server, not in the page.
+    await page.reload();
+    await expect(page.getByRole("button", { name: /using your groq key/i })).toBeVisible();
+
+    await page.goto("/dashboard");
+    await page.getByRole("button", { name: /logout/i }).click();
+    await expect(page).toHaveURL(/\/login/);
+
+    await page.getByPlaceholder("Email").fill(user.email);
+    await page.getByPlaceholder("Password").fill(user.password);
+    await page.getByRole("button", { name: /^sign in$/i }).click();
+    await expect(page).toHaveURL(/\/dashboard/);
+    await page.goto(sessionUrl);
+    await expect(page.getByRole("button", { name: /add ai key/i })).toBeVisible();
   });
 });
 

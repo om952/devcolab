@@ -12,8 +12,8 @@ import json
 import operator
 import re
 from collections.abc import AsyncIterator, Callable
-from dataclasses import dataclass
-from functools import lru_cache
+from contextvars import ContextVar, Token
+from dataclasses import dataclass, field
 from typing import Annotated, Any, TypedDict
 
 import structlog
@@ -37,13 +37,6 @@ try:
     GROQ_AVAILABLE = True
 except ImportError:  # pragma: no cover - depends on install extras
     GROQ_AVAILABLE = False
-
-try:
-    from langchain_ollama import ChatOllama
-
-    OLLAMA_AVAILABLE = True
-except ImportError:  # pragma: no cover - depends on install extras
-    OLLAMA_AVAILABLE = False
 
 
 AGENT_TIMEOUT_SECONDS = get_settings().agent_timeout_seconds
@@ -86,89 +79,95 @@ def is_overloaded(exc: BaseException) -> bool:
 
 
 class NoLLMConfiguredError(RuntimeError):
-    """Raised when neither Groq nor Ollama is usable."""
+    """Raised when a review is attempted without the caller's LLM credentials."""
 
 
-@lru_cache(maxsize=1)
-def get_llm():
-    """Build the LLM client once and reuse it across agents and requests.
+SUPPORTED_PROVIDERS = ("gemini", "groq")
 
-    Providers are tried in priority order — Gemini, then Groq, then a local
-    Ollama — so configuring a key is the only step needed to switch.
+
+@dataclass(frozen=True)
+class LLMCredential:
+    """The caller's own provider key, valid for one request and never stored.
+
+    ``repr=False`` on the key keeps it out of tracebacks, logs and Sentry
+    breadcrumbs that stringify the object.
     """
+
+    provider: str
+    api_key: str = field(repr=False)
+
+
+_credential: ContextVar[LLMCredential | None] = ContextVar("llm_credential", default=None)
+"""The credential for the request being served. A context variable rather than
+a global, so concurrent reviews for different users can never see each other's
+key, and it follows the agents into the tasks the graph spawns."""
+
+
+def use_credential(credential: LLMCredential) -> Token:
+    return _credential.set(credential)
+
+
+def release_credential(token: Token) -> None:
+    _credential.reset(token)
+
+
+def scrub(text: str) -> str:
+    """Remove the active key from text on its way to a log, event or response.
+
+    Provider errors occasionally echo the request; the key must not travel with
+    them into logs or back to another service.
+    """
+    credential = _credential.get()
+    if credential and credential.api_key:
+        return text.replace(credential.api_key, "[redacted]")
+    return text
+
+
+def get_llm():
+    """Build a client from the current request's own key.
+
+    Nothing is cached: a client holds its key, so a shared one would keep the
+    first user's credentials alive and hand them to everyone after.
+    """
+    credential = _credential.get()
+    if credential is None:
+        raise NoLLMConfiguredError("No LLM key supplied. Add your Gemini or Groq API key to run a review.")
+
     settings = get_settings()
 
-    if settings.google_api_key and GEMINI_AVAILABLE:
-        logger.info("llm_selected", provider="gemini", model=settings.gemini_model)
+    if credential.provider == "gemini" and GEMINI_AVAILABLE:
         return ChatGoogleGenerativeAI(
-            google_api_key=settings.google_api_key,
+            google_api_key=credential.api_key,
             model=settings.gemini_model,
             temperature=0.1,
             max_retries=2,
         )
 
-    if settings.groq_api_key and GROQ_AVAILABLE:
-        logger.info("llm_selected", provider="groq", model="llama-3.1-8b-instant")
+    if credential.provider == "groq" and GROQ_AVAILABLE:
         return ChatGroq(
-            api_key=settings.groq_api_key,
-            model="llama-3.1-8b-instant",
+            api_key=credential.api_key,
+            model=settings.groq_model,
             temperature=0.1,
             max_retries=2,
         )
 
-    if OLLAMA_AVAILABLE:
-        logger.info("llm_selected", provider="ollama", model="codellama:7b")
-        return ChatOllama(
-            base_url=settings.ollama_host,
-            model="codellama:7b",
-            temperature=0.1,
-        )
-
-    raise NoLLMConfiguredError(
-        "No LLM available. Set GOOGLE_API_KEY or GROQ_API_KEY, or run Ollama "
-        "and install langchain-ollama."
-    )
-
-
-_READINESS_TTL_SECONDS = 10.0
-_readiness_cache: tuple[float, bool, str] | None = None
+    raise NoLLMConfiguredError(f"Unsupported or unavailable LLM provider: {credential.provider}")
 
 
 async def check_llm_ready() -> tuple[bool, str]:
-    """Readiness check for the configured LLM provider.
+    """Readiness: the provider client libraries are installed.
 
-    Constructing a client proves nothing — ChatOllama builds fine against a dead
-    host — so for Ollama we actually probe the server. For Groq we can only
-    confirm a key is present without spending a paid call.
-
-    Cached briefly so frequent probes do not hammer the provider.
+    There is no server-side key to probe, since each user brings their own, so
+    the most this can vouch for is that the service is able to talk to them.
     """
-    global _readiness_cache
-
-    now = asyncio.get_event_loop().time()
-    if _readiness_cache and now - _readiness_cache[0] < _READINESS_TTL_SECONDS:
-        return _readiness_cache[1], _readiness_cache[2]
-
-    settings = get_settings()
-    ready, detail = False, "no provider configured"
-
-    if settings.google_api_key and GEMINI_AVAILABLE:
-        ready, detail = True, f"gemini api key configured ({settings.gemini_model})"
-    elif settings.groq_api_key and GROQ_AVAILABLE:
-        ready, detail = True, "groq api key configured"
-    elif OLLAMA_AVAILABLE:
-        try:
-            import httpx
-
-            async with httpx.AsyncClient(timeout=2.0) as client:
-                resp = await client.get(f"{settings.ollama_host.rstrip('/')}/api/tags")
-            ready = resp.status_code == 200
-            detail = "ollama reachable" if ready else f"ollama returned {resp.status_code}"
-        except Exception as exc:  # noqa: BLE001
-            ready, detail = False, f"ollama unreachable: {type(exc).__name__}"
-
-    _readiness_cache = (now, ready, detail)
-    return ready, detail
+    available = [
+        name
+        for name, present in (("gemini", GEMINI_AVAILABLE), ("groq", GROQ_AVAILABLE))
+        if present
+    ]
+    if not available:
+        return False, "no provider client libraries installed"
+    return True, f"per-request keys; providers available: {', '.join(available)}"
 
 
 class ReviewState(TypedDict):
@@ -302,7 +301,7 @@ _FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL)
 def response_text(response: Any) -> str:
     """Flatten an LLM response into plain text.
 
-    Providers disagree on the shape of `.content`: Groq and Ollama return a
+    Providers disagree on the shape of `.content`: Groq returns a
     string, while Gemini returns a list of content blocks
     (``[{"type": "text", "text": ...}]``). Normalising here keeps the parsing
     below provider-agnostic instead of branching per vendor.
@@ -479,18 +478,18 @@ async def run_agent(spec: AgentSpec, state: ReviewState) -> dict:
             ],
         }
     except Exception as exc:  # noqa: BLE001 - one agent must not sink the run
-        log.error("agent_failed", error=str(exc), error_type=type(exc).__name__)
+        log.error("agent_failed", error=scrub(str(exc)), error_type=type(exc).__name__)
         # Provider throttling is the common failure when reviewing many files;
         # a raw 429 payload tells a reviewer nothing actionable.
         if is_rate_limited(exc):
             message = (
-                "rate limited by the LLM provider — retry in a minute or reduce "
-                "AI_REVIEW_CONCURRENCY"
+                "rate limited by your LLM provider — wait a minute and retry, "
+                "or check your key's quota"
             )
         elif is_overloaded(exc):
             message = "the LLM provider is temporarily overloaded — retry in a minute"
         else:
-            message = str(exc)
+            message = scrub(str(exc))
         return {spec.state_key: [], "agent_errors": [{"agent": spec.name, "error": message}]}
 
 

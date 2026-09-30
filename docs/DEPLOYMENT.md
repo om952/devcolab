@@ -21,10 +21,11 @@ it describe the self-hosted VM path.
    export DIRECT_URL='<unpooled url>'
    pnpm db:migrate
    ```
-3. **Gemini key**: aistudio.google.com/apikey.
+3. **LLM keys**: none on the server. Each user adds their own Gemini or Groq
+   key in the app (the "Add AI key" button in a session).
 4. **Render**: New -> Blueprint -> connect the repo, branch `master`. Render
-   asks for `DATABASE_URL` (pooled Neon URL) and `GOOGLE_API_KEY`; everything
-   else is generated or set in the file.
+   asks for `DATABASE_URL` (pooled Neon URL); everything else is generated or
+   set in the file.
 5. **Verify** once all three are live (the first request to a sleeping service
    takes about a minute):
    ```bash

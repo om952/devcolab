@@ -2,6 +2,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest
 import { prisma } from "@devcolab/database";
 import { processRun } from "../src/services/ai-review-runner";
 import { databaseAvailable, cleanupUsers, uniqueEmail } from "./helpers/app";
+import { clearCredential, setCredential } from "../src/lib/llm-credentials";
 
 const hasDb = await databaseAvailable();
 const suite = hasDb ? describe : describe.skip;
@@ -41,6 +42,7 @@ suite("per-agent failure reporting", () => {
       data: { email, name: "Runner Test", password: "x", role: "author" },
     });
     userId = user.id;
+    setCredential(userId, { provider: "groq", apiKey: "gsk_runner_test_key" });
     const session = await prisma.session.create({
       data: { title: "agent failure test", createdById: user.id },
     });
@@ -162,5 +164,30 @@ suite("per-agent failure reporting", () => {
 
     expect(result!.degraded).toBe(false);
     expect(result!.agentRuns.every((a) => a.status === "completed")).toBe(true);
+  });
+
+  it("sends the user's own key to ai-service as headers, never in the body", async () => {
+    await runWith([frame({ type: "consolidated", issues: [], summary: "s", agent_errors: [] })]);
+
+    const [, init] = vi.mocked(fetch).mock.calls[0] as [string, RequestInit];
+    const headers = init.headers as Record<string, string>;
+    expect(headers["X-LLM-Provider"]).toBe("groq");
+    expect(headers["X-LLM-Api-Key"]).toBe("gsk_runner_test_key");
+    expect(String(init.body)).not.toContain("gsk_runner_test_key");
+  });
+
+  it("fails a queued run whose key is gone instead of passing off regex results as AI", async () => {
+    clearCredential(userId);
+    try {
+      const result = await runWith([]);
+
+      expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+      expect(result!.status).toBe("failed");
+      expect(result!.engine).toBeNull();
+      expect(result!.error).toMatch(/add it again/i);
+      expect(result!.agentRuns.every((a) => a.status === "failed")).toBe(true);
+    } finally {
+      setCredential(userId, { provider: "groq", apiKey: "gsk_runner_test_key" });
+    }
   });
 });

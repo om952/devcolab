@@ -13,6 +13,18 @@ export const logger = pino({
   base: { service: "collab-server" },
   timestamp: pino.stdTimeFunctions.isoTime,
   serializers: pino.stdSerializers,
+  // Request logging records headers. None of these may reach a log line: the
+  // session cookie, bearer tokens, the service key, or a user's own LLM key.
+  redact: {
+    paths: [
+      "req.headers.cookie",
+      "req.headers.authorization",
+      'req.headers["x-internal-api-key"]',
+      'req.headers["x-llm-api-key"]',
+      'res.headers["set-cookie"]',
+    ],
+    censor: "[redacted]",
+  },
 });
 
 export default logger;

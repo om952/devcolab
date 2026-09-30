@@ -194,13 +194,16 @@ openssl rand -hex 32   # use for INTERNAL_API_KEY
 - Socket.IO connections are authenticated during the handshake from the same
   cookie. Client-supplied user ids are ignored — identity always comes from
   the token.
+- Users bring their own Gemini or Groq key. The collab-server holds it in
+  memory only (never the database, Redis, logs or Sentry), passes it to the
+  ai-service per review in a header, and never returns it to the browser. It is
+  dropped on logout, after `LLM_KEY_TTL_MS` (default 8h), or on restart.
 - Auth endpoints are rate limited (20 per 15 min per IP, tunable with
   `AUTH_RATE_LIMIT_MAX`), and failed logins are also limited per account (10 per
   15 min, `AUTH_ACCOUNT_RATE_LIMIT_MAX`). Behind Render's proxy chain the client
   IP cannot be identified exactly, so the per-account limit is the one to rely
-  on; AI review is limited to 5 per minute and
-  `AI_REVIEW_DAILY_LIMIT` (default 50) per day per user. With `REDIS_URL` set,
-  the per-minute limits are shared across instances.
+  on; AI review is limited to 5 per minute per user. With `REDIS_URL` set, the
+  per-minute limits are shared across instances.
 - The client asks `GET /api/auth/me` on load, and every request signs the user
   out on a 401, so a stale session lands on the login page instead of
   rendering an empty one.

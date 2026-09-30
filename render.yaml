@@ -104,5 +104,5 @@ services:
         generateValue: true
       - key: CORS_ORIGINS
         value: https://devcolab-web.onrender.com
-      - key: GOOGLE_API_KEY
-        sync: false
+      # No provider key: every user brings their own Gemini or Groq key in
+      # the app. collab-server holds it in memory and passes it per review.
