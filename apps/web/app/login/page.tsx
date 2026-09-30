@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "../lib/auth-context";
-
+import { failureMessage, networkFailureMessage } from "../lib/api-errors";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -30,13 +30,14 @@ export default function LoginPage() {
         body: JSON.stringify(body),
       });
 
+      if (!res.ok) throw new Error(await failureMessage(res, "Something went wrong"));
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Something went wrong");
 
       login(data.user);
       router.push("/dashboard");
     } catch (err: any) {
-      setError(err.message);
+      // fetch itself rejects (rather than returning a status) when the network drops.
+      setError(err instanceof TypeError ? networkFailureMessage() : err.message);
     } finally {
       setLoading(false);
     }

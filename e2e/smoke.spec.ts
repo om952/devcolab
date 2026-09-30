@@ -278,6 +278,62 @@ test.describe("bring your own LLM key", () => {
   });
 });
 
+test.describe("when the server is asleep", () => {
+  // Render's free tier sleeps after 15 minutes idle; while it wakes, the proxy
+  // answers 502. These reproduce that with a stubbed response.
+  const html502 = { status: 502, contentType: "text/html", body: "<html><body>Bad Gateway</body></html>" };
+
+  test("a failed create says the server is waking, keeps the form, and can be retried", async ({ page }) => {
+    await register(page);
+    await page.getByRole("button", { name: /new session/i }).click();
+    await page.getByPlaceholder("Session title").fill("Retry Me");
+
+    let failNext = true;
+    await page.route("**/api/sessions", async (route) => {
+      if (route.request().method() === "POST" && failNext) {
+        failNext = false;
+        await route.fulfill(html502);
+      } else {
+        await route.continue();
+      }
+    });
+
+    await page.getByRole("button", { name: /^create$/i }).click();
+
+    await expect(page.getByTestId("error-banner")).toContainText(/waking up/i);
+    // What the user typed is still there, so retrying is one click.
+    await expect(page.getByPlaceholder("Session title")).toHaveValue("Retry Me");
+
+    await page.getByRole("button", { name: /^create$/i }).click();
+    await expect(page.getByText("Retry Me", { exact: true })).toBeVisible();
+    await expect(page.getByTestId("error-banner")).toHaveCount(0);
+  });
+
+  test("a failed load does not claim you have no sessions", async ({ page }) => {
+    await register(page);
+    await page.route("**/api/sessions", (route) =>
+      route.request().method() === "GET" ? route.fulfill(html502) : route.continue()
+    );
+
+    await page.reload();
+
+    await expect(page.getByTestId("error-banner")).toContainText(/waking up/i);
+    await expect(page.getByText(/no sessions yet/i)).toHaveCount(0);
+    await expect(page.getByRole("button", { name: /try again/i })).toBeVisible();
+  });
+
+  test("sign-in shows a sentence, not a parse error, when the server is down", async ({ page }) => {
+    await page.route("**/api/auth/login", (route) => route.fulfill(html502));
+    await page.goto("/login");
+    await page.getByPlaceholder("Email").fill("someone@example.com");
+    await page.getByPlaceholder("Password").fill("password123");
+    await page.getByRole("button", { name: /^sign in$/i }).click();
+
+    await expect(page.getByText(/waking up/i)).toBeVisible();
+    await expect(page.getByText(/unexpected token|json/i)).toHaveCount(0);
+  });
+});
+
 test.describe("session visibility", () => {
   test("one user's dashboard does not show another user's session", async ({ browser }) => {
     const ownerCtx = await browser.newContext();
