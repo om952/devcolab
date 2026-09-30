@@ -4,6 +4,7 @@ import { env } from "../lib/env";
 import logger from "../lib/logger";
 import { getAiReviewerUserId } from "../lib/ai-user";
 import { enqueueReviewJob } from "../lib/queue";
+import { getCredential, redactKey, type LlmCredential } from "../lib/llm-credentials";
 import {
   generateHeuristicReview,
   type IssueCategory,
@@ -171,8 +172,9 @@ async function runViaAiService(params: {
   language: string;
   aiUserId: string;
   io: Server | null;
+  credential: LlmCredential;
 }): Promise<{ totalIssues: number; summary: string; degraded: boolean }> {
-  const { runId, sessionId, fileId, filePath, code, language, aiUserId, io } = params;
+  const { runId, sessionId, fileId, filePath, code, language, aiUserId, io, credential } = params;
 
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
@@ -181,6 +183,10 @@ async function runViaAiService(params: {
     "X-Request-Id": runId,
   };
   if (env.INTERNAL_API_KEY) headers["X-Internal-Api-Key"] = env.INTERNAL_API_KEY;
+  // The user's own key, for this one call. Headers, not the body, since bodies
+  // are what loggers and error reporters capture.
+  headers["X-LLM-Provider"] = credential.provider;
+  headers["X-LLM-Api-Key"] = credential.apiKey;
 
   const response = await fetch(`${env.AI_SERVICE_URL}/api/v1/review/stream`, {
     method: "POST",
@@ -192,6 +198,7 @@ async function runViaAiService(params: {
   if (!response.ok || !response.body) {
     throw new Error(`AI service returned ${response.status}`);
   }
+
 
   const seenAgents = new Set<AgentType>();
   let totalIssues = 0;
@@ -295,6 +302,43 @@ async function runViaHeuristics(params: {
   return { totalIssues: result.issues.length, summary: result.summary };
 }
 
+/** An error safe to log: the user's key removed from its message and stack. */
+function redactErr(err: unknown, apiKey: string): unknown {
+  if (!(err instanceof Error)) return err;
+  const safe = new Error(redactKey(err.message, apiKey));
+  safe.name = err.name;
+  safe.stack = redactKey(err.stack ?? "", apiKey);
+  return safe;
+}
+
+/**
+ * The run was queued but its owner's key is gone (logout, expiry, or a restart
+ * that emptied memory). Fail it plainly rather than quietly running the regex
+ * scanner and presenting that as the AI review they asked for.
+ */
+async function failRunForMissingKey(params: {
+  runId: string;
+  sessionId: string;
+  fileId: string;
+  io: Server | null;
+}) {
+  const { runId, sessionId, fileId, io } = params;
+  const message = "Your AI key is no longer available. Add it again and re-run the review.";
+
+  await prisma.$transaction([
+    prisma.aIReview.updateMany({
+      where: { runId },
+      data: { status: "failed", error: message, completedAt: new Date() },
+    }),
+    prisma.aIReviewRun.update({
+      where: { id: runId },
+      data: { status: "failed", error: message, completedAt: new Date() },
+    }),
+  ]);
+
+  io?.to(sessionId).emit("ai:review_failed", { runId, fileId, error: message, code: "llm_key_required" });
+}
+
 export async function processRun(runId: string, io: Server | null): Promise<void> {
   const run = await prisma.aIReviewRun.findUnique({
     where: { id: runId },
@@ -327,13 +371,25 @@ export async function processRun(runId: string, io: Server | null): Promise<void
 
   try {
     const aiUserId = await getAiReviewerUserId();
+
+    // Looked up now, not when the run was queued: a run that waits its turn, or
+    // is retried after a restart, must not use a key the user has since removed.
+    const credential = getCredential(run.triggeredById);
+    if (!credential) {
+      await failRunForMissingKey({ runId, sessionId, fileId: codeFile.id, io });
+      return;
+    }
+
     let engine: ReviewEngine = "ai";
     let outcome: { totalIssues: number; summary: string; degraded?: boolean };
 
     try {
-      outcome = await runViaAiService({ ...shared, aiUserId });
+      outcome = await runViaAiService({ ...shared, aiUserId, credential });
     } catch (aiErr) {
-      log.warn({ err: aiErr }, "AI service unavailable, falling back to heuristic scanner");
+      log.warn(
+        { err: redactErr(aiErr, credential.apiKey) },
+        "AI service unavailable, falling back to heuristic scanner"
+      );
       engine = "heuristic-fallback";
       outcome = await runViaHeuristics({ ...shared, aiUserId });
     }

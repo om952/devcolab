@@ -66,9 +66,11 @@ const envSchema = z
     // job is retried before it is left as failed.
     AI_REVIEW_CONCURRENCY: z.coerce.number().int().min(1).max(50).default(3),
     AI_REVIEW_JOB_ATTEMPTS: z.coerce.number().int().min(1).max(10).default(2),
-    // Reviews one user may start in any rolling 24 hours. Each review is four
-    // LLM calls, so this bounds what one account can spend on the provider quota.
-    AI_REVIEW_DAILY_LIMIT: z.coerce.number().int().min(1).default(50),
+    // How long a user's own LLM key is kept in memory after they enter it.
+    LLM_KEY_TTL_MS: z.coerce.number().int().min(60_000).default(8 * 60 * 60 * 1000),
+    // "skip" accepts any key without asking the provider. Only for the browser
+    // test suite, which must not depend on Google or Groq; refused in production.
+    LLM_KEY_CHECK: z.enum(["provider", "skip"]).default("provider"),
   })
   .superRefine((value, ctx) => {
     if (value.NODE_ENV !== "production") return;
@@ -86,6 +88,14 @@ const envSchema = z
         code: z.ZodIssueCode.custom,
         path: ["INTERNAL_API_KEY"],
         message: "required in production so ai-service can reject unauthenticated callers",
+      });
+    }
+
+    if (value.LLM_KEY_CHECK === "skip") {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["LLM_KEY_CHECK"],
+        message: "must not skip key checks in production",
       });
     }
 

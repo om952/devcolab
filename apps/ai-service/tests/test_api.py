@@ -9,10 +9,15 @@ from app.config import Settings, get_settings
 from app.main import app
 from app.services import agents as A
 
+LLM_KEY = "test-key-0123456789abcdef"
+
 
 @pytest.fixture
 def client():
-    with TestClient(app) as c:
+    # Every review request must carry the caller's own key; individual tests
+    # override these headers to exercise the missing/invalid cases.
+    headers = {"X-LLM-Provider": "gemini", "X-LLM-Api-Key": LLM_KEY}
+    with TestClient(app, headers=headers) as c:
         yield c
 
 
@@ -45,20 +50,14 @@ class TestHealth:
         assert res.status_code in (200, 503)
         assert "llm_provider" in res.json()["checks"]
 
-    def test_readiness_fails_when_no_provider_is_reachable(self, client, monkeypatch):
-        get_settings.cache_clear()
-        A._readiness_cache = None
-        # Every provider must be knocked out, otherwise the check legitimately
-        # reports ready via whichever one is still configured.
-        monkeypatch.setenv("GOOGLE_API_KEY", "")
-        monkeypatch.setenv("GEMINI_API_KEY", "")
-        monkeypatch.setenv("GROQ_API_KEY", "")
-        monkeypatch.setenv("OLLAMA_HOST", "http://127.0.0.1:59999")
+    def test_readiness_fails_when_no_provider_library_is_installed(self, client, monkeypatch):
+        # There is no server-side key to probe; the most readiness can vouch
+        # for is that a provider client is installed to use the caller's key.
+        monkeypatch.setattr(A, "GEMINI_AVAILABLE", False)
+        monkeypatch.setattr(A, "GROQ_AVAILABLE", False)
 
         res = client.get("/health/ready")
 
-        get_settings.cache_clear()
-        A._readiness_cache = None
         assert res.status_code == 503
         assert res.json()["status"] == "degraded"
 
@@ -145,14 +144,53 @@ class TestReviewEndpoint:
         assert body["degraded"] is True
         assert body["agent_errors"][0]["agent"] == "security_scan"
 
-    def test_returns_503_when_no_llm_is_configured(self, client, no_api_key, monkeypatch):
+    def test_requires_the_callers_own_llm_key(self, client, no_api_key):
+        res = client.post(
+            "/api/v1/review",
+            json={"code": "x=1", "language": "python"},
+            headers={"X-LLM-Api-Key": ""},
+        )
+        assert res.status_code == 400
+        assert "key" in res.json()["detail"].lower()
+
+    def test_rejects_an_unsupported_provider(self, client, no_api_key):
+        res = client.post(
+            "/api/v1/review",
+            json={"code": "x=1", "language": "python"},
+            headers={"X-LLM-Provider": "openai"},
+        )
+        assert res.status_code == 400
+        assert "gemini" in res.json()["detail"]
+
+    def test_the_key_is_available_to_the_review_and_gone_afterwards(
+        self, client, no_api_key, monkeypatch
+    ):
+        seen = {}
+
         async def fake_review(**_kwargs):
-            raise A.NoLLMConfiguredError("No LLM available")
+            seen["credential"] = A._credential.get()
+            return {"issues": [], "summary": "ok", "agent_errors": []}
+
+        monkeypatch.setattr("app.routers.review.run_code_review", fake_review)
+        res = client.post(
+            "/api/v1/review",
+            json={"code": "x=1", "language": "python"},
+            headers={"X-LLM-Provider": "groq"},
+        )
+
+        assert res.status_code == 200
+        assert (seen["credential"].provider, seen["credential"].api_key) == ("groq", LLM_KEY)
+        assert A._credential.get() is None, "the key must not outlive the request"
+
+    def test_the_key_never_appears_in_the_response(self, client, no_api_key, monkeypatch):
+        async def fake_review(**_kwargs):
+            raise RuntimeError(f"provider rejected key {LLM_KEY}")
 
         monkeypatch.setattr("app.routers.review.run_code_review", fake_review)
         res = client.post("/api/v1/review", json={"code": "x=1", "language": "python"})
-        # 503 tells the caller to fall back rather than treating it as a bug.
-        assert res.status_code == 503
+
+        assert res.status_code == 500
+        assert LLM_KEY not in res.text
 
     def test_returns_500_on_an_unexpected_failure(self, client, no_api_key, monkeypatch):
         async def fake_review(**_kwargs):
@@ -190,6 +228,29 @@ class TestStreamEndpoint:
             "consolidated",
             "complete",
         ]
+
+    def test_stream_also_requires_the_callers_key(self, client, no_api_key):
+        res = client.post(
+            "/api/v1/review/stream",
+            json={"code": "x=1", "language": "python"},
+            headers={"X-LLM-Api-Key": ""},
+        )
+        assert res.status_code == 400
+
+    def test_the_key_reaches_the_streaming_agents_and_is_released(
+        self, client, no_api_key, monkeypatch
+    ):
+        seen = {}
+
+        async def fake_stream(**_kwargs):
+            seen["credential"] = A._credential.get()
+            yield {"type": "consolidated", "issues": [], "summary": "ok", "agent_errors": []}
+
+        monkeypatch.setattr("app.routers.review.run_code_review_stream", fake_stream)
+        client.post("/api/v1/review/stream", json={"code": "x=1", "language": "python"})
+
+        assert seen["credential"].api_key == LLM_KEY
+        assert A._credential.get() is None
 
     def test_reports_pipeline_errors_as_a_frame(self, client, no_api_key, monkeypatch):
         async def failing_stream(**_kwargs):

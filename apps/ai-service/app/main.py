@@ -25,11 +25,26 @@ structlog.configure(
 logger = structlog.get_logger(service="ai-service")
 
 # Initialize Sentry (no-op if DSN is not set)
+def _strip_llm_key(event, _hint):
+    """Keep users' provider keys out of error reports.
+
+    The key travels in a request header, and Sentry's own scrubbing only knows
+    the common header names.
+    """
+    headers = (event.get("request") or {}).get("headers")
+    if isinstance(headers, dict):
+        for name in list(headers):
+            if name.lower() in ("x-llm-api-key", "x-internal-api-key"):
+                headers[name] = "[Filtered]"
+    return event
+
+
 if settings.sentry_dsn:
     sentry_sdk.init(
         dsn=settings.sentry_dsn,
         traces_sample_rate=0.2,
         send_default_pii=False,
+        before_send=_strip_llm_key,
     )
     logger.info("sentry_initialized")
 

@@ -7,10 +7,11 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     """Validated environment variables for ai-service."""
 
-    # LLM provider keys. Providers are tried in priority order at runtime:
-    # Gemini -> Groq -> Ollama. See app.services.agents.get_llm.
-    google_api_key: str = ""
+    # There are no server-side provider keys: every user brings their own,
+    # sent with each request (see app.routers.review). Only the models are
+    # configured here.
     gemini_model: str = "gemini-3.6-flash"
+    groq_model: str = "llama-3.1-8b-instant"
 
     # Per-agent wall clock budget, in seconds. Reasoning-capable models emit
     # thinking tokens before answering and are markedly slower than the small
@@ -19,9 +20,6 @@ class Settings(BaseSettings):
     # side aborts the stream and falls back to heuristics while agents are
     # still working.
     agent_timeout_seconds: float = 90.0
-    groq_api_key: str = ""
-    ollama_host: str = "http://localhost:11434"
-    huggingface_api_token: str = ""
 
     # Inter-service security
     internal_api_key: str = ""
@@ -39,6 +37,9 @@ class Settings(BaseSettings):
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
+        # Old deployments still carry GOOGLE_API_KEY and friends; ignore them
+        # rather than refusing to start.
+        extra = "ignore"
 
     @property
     def cors_origin_list(self) -> list[str]:

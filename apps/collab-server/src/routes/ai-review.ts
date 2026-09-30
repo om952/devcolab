@@ -1,10 +1,10 @@
-import { Router } from "express";
+import { Router, type Response } from "express";
 import { z } from "zod";
 import { prisma } from "@devcolab/database";
 import { authenticate, asyncHandler, AuthRequest } from "../lib/middleware";
 import { ANY_MEMBER, requireSessionRole } from "../lib/session-access";
 import { aiReviewLimiter } from "../lib/rate-limit";
-import { dailyLimitMessage, remainingDailyReviews } from "../lib/ai-quota";
+import { getCredential } from "../lib/llm-credentials";
 import { enqueueReview, enqueueReviewBatch } from "../services/ai-review-runner";
 import logger from "../lib/logger";
 
@@ -13,6 +13,20 @@ import logger from "../lib/logger";
  * unbounded batch would exhaust a provider's quota in one click.
  */
 const MAX_BATCH_REVIEW_FILES = 25;
+
+/**
+ * Reviews run on the caller's own LLM key, held in memory only. Without one
+ * there is nothing to run on, and the client is told to ask for it rather than
+ * getting a run that fails a minute later.
+ */
+function requireLlmKey(req: AuthRequest, res: Response): boolean {
+  if (getCredential(req.user!.userId)) return true;
+  res.status(428).json({
+    error: "Add your Gemini or Groq API key to run an AI review.",
+    code: "llm_key_required",
+  });
+  return false;
+}
 
 // Mounted at /api/sessions/:sessionId/ai-review — paths here are relative to
 // that prefix, so they must not repeat it.
@@ -57,10 +71,7 @@ router.post(
       return;
     }
 
-    if ((await remainingDailyReviews(req.user!.userId)) < 1) {
-      res.status(429).json({ error: dailyLimitMessage() });
-      return;
-    }
+    if (!requireLlmKey(req, res)) return;
 
     try {
       const { run, alreadyRunning } = await enqueueReview({
@@ -129,18 +140,10 @@ router.post(
       return;
     }
 
-    const remaining = await remainingDailyReviews(req.user!.userId);
-    if (remaining < 1) {
-      res.status(429).json({ error: dailyLimitMessage() });
-      return;
-    }
+    if (!requireLlmKey(req, res)) return;
 
-    // Whichever is tighter wins: the per-batch ceiling or what is left of the
-    // user's daily allowance. Files past it are reported, not silently dropped.
-    const budget = Math.min(MAX_BATCH_REVIEW_FILES, remaining);
-    const skipReason = budget < MAX_BATCH_REVIEW_FILES ? "over your daily review limit" : "over the per-batch limit";
-    const selected = valid.slice(0, budget);
-    const overflow = valid.slice(budget);
+    const selected = valid.slice(0, MAX_BATCH_REVIEW_FILES);
+    const overflow = valid.slice(MAX_BATCH_REVIEW_FILES);
 
     try {
       const result = await enqueueReviewBatch({
@@ -154,7 +157,7 @@ router.post(
         runs: result.runs.map((run) => ({ ...run, filePath: known.get(run.fileId) })),
         queued: result.queued,
         attached: result.attached,
-        skipped: overflow.map((id) => ({ fileId: id, filePath: known.get(id), reason: skipReason })),
+        skipped: overflow.map((id) => ({ fileId: id, filePath: known.get(id), reason: "over the per-batch limit" })),
         limit: MAX_BATCH_REVIEW_FILES,
         message: `Queued ${result.queued} file(s) for review — progress streams over the session socket`,
       });

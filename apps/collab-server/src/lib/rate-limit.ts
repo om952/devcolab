@@ -53,6 +53,16 @@ export const loginAccountLimiter = rateLimit({
   message: { error: "Too many failed sign-in attempts for this account. Try again later." },
 });
 
+/** Each attempt calls the provider to check the key, so keep it modest. */
+export const llmKeyLimiter = rateLimit({
+  ...base,
+  windowMs: 60 * 1000,
+  limit: 10,
+  store: makeStore("rl:llm-key:"),
+  keyGenerator: (req) => (req as AuthRequest).user?.userId ?? req.ip ?? "unknown",
+  message: { error: "Too many attempts. Please wait a minute." },
+});
+
 /** LLM calls cost money — key by authenticated user, not IP. */
 export const aiReviewLimiter = rateLimit({
   ...base,

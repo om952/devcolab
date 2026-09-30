@@ -1,9 +1,14 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import request from "supertest";
 import type { Express } from "express";
 import bcrypt from "bcryptjs";
 import { prisma } from "@devcolab/database";
 import { env } from "../src/lib/env";
+import { clearCredential, getCredential, setCredential } from "../src/lib/llm-credentials";
+import { checkKeyWithProvider } from "../src/lib/llm-key-check";
+
+// Never call Google or Groq from tests; each test decides what the provider says.
+vi.mock("../src/lib/llm-key-check", () => ({ checkKeyWithProvider: vi.fn() }));
 import { buildTestApp, cleanupUsers, databaseAvailable, sessionToken, uniqueEmail } from "./helpers/app";
 
 const hasDb = await databaseAvailable();
@@ -27,6 +32,9 @@ suite("REST API integration", () => {
     const res = await request(app)
       .post("/api/auth/register")
       .send({ email, name: "Test User", password: "password123", role });
+    // Reviews need the user's own LLM key. Most tests are not about that, so
+    // every test user starts with one; the key tests clear it themselves.
+    if (res.body.user?.id) setCredential(res.body.user.id, { provider: "gemini", apiKey: "test-llm-key-123" });
     return { email, token: sessionToken(res), user: res.body.user, res };
   };
 
@@ -619,72 +627,102 @@ suite("REST API integration", () => {
     });
   });
 
-  describe("daily AI review limit", () => {
-    /** Pretend this user already started `count` reviews in the last 24 hours. */
-    const seedRuns = (sessionId: string, userId: string, count: number) =>
-      prisma.aIReviewRun.createMany({
-        data: Array.from({ length: count }, () => ({
-          sessionId,
-          triggeredById: userId,
-          status: "completed" as const,
-        })),
-      });
+  describe("bring your own LLM key", () => {
+    const keyCheck = vi.mocked(checkKeyWithProvider);
+    beforeEach(() => keyCheck.mockReset());
 
-    const setup = async () => {
+    const newUser = async () => {
       const user = await register("reviewer");
-      const auth = { Authorization: `Bearer ${user.token}` };
-      const session = await request(app).post("/api/sessions").set(auth).send({ title: "Quota" });
-      return { user, auth, sessionId: session.body.id as string };
+      clearCredential(user.user.id);
+      return { ...user, auth: { Authorization: `Bearer ${user.token}` } };
     };
 
-    const addFile = async (auth: Record<string, string>, sessionId: string, name: string) => {
-      const res = await request(app)
-        .post(`/api/sessions/${sessionId}/files`)
-        .set(auth)
-        .send({ filePath: name, content: "const x = 1;\n", language: "typescript" });
-      return res.body.id as string;
-    };
-
-    it("refuses a single review once the day's allowance is used", async () => {
-      const { user, auth, sessionId } = await setup();
-      const fileId = await addFile(auth, sessionId, "a.ts");
-      await seedRuns(sessionId, user.user.id, env.AI_REVIEW_DAILY_LIMIT);
-
-      const res = await request(app).post(`/api/sessions/${sessionId}/ai-review`).set(auth).send({ fileId });
-
-      expect(res.status).toBe(429);
-      expect(res.body.error).toMatch(/daily AI review limit/i);
+    it("reports no key until one is set", async () => {
+      const { auth } = await newUser();
+      const res = await request(app).get("/api/llm-key").set(auth);
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ configured: false });
     });
 
-    it("trims a folder review to what is left instead of refusing it outright", async () => {
-      const { user, auth, sessionId } = await setup();
-      const ids = [
-        await addFile(auth, sessionId, "a.ts"),
-        await addFile(auth, sessionId, "b.ts"),
-        await addFile(auth, sessionId, "c.ts"),
-      ];
-      await seedRuns(sessionId, user.user.id, env.AI_REVIEW_DAILY_LIMIT - 1);
+    it("stores a key the provider accepts and never returns it", async () => {
+      keyCheck.mockResolvedValue({ ok: true });
+      const { auth, user } = await newUser();
 
-      const res = await request(app)
-        .post(`/api/sessions/${sessionId}/ai-review/batch`)
+      const put = await request(app)
+        .put("/api/llm-key")
         .set(auth)
-        .send({ fileIds: ids });
+        .send({ provider: "groq", apiKey: "gsk_valid_key_000" });
+      expect(put.status).toBe(200);
+      expect(keyCheck).toHaveBeenCalledWith("groq", "gsk_valid_key_000");
 
-      expect(res.status).toBe(202);
-      expect(res.body.runs).toHaveLength(1);
-      expect(res.body.skipped).toHaveLength(2);
-      expect(res.body.skipped[0].reason).toBe("over your daily review limit");
+      const status = await request(app).get("/api/llm-key").set(auth);
+      expect(status.body).toMatchObject({ configured: true, provider: "groq" });
+      expect(JSON.stringify(put.body) + JSON.stringify(status.body)).not.toContain("gsk_valid_key_000");
+
+      expect(getCredential(user.id)).toEqual({ provider: "groq", apiKey: "gsk_valid_key_000" });
     });
 
-    it("does not count another user's reviews against you", async () => {
-      const other = await setup();
-      await seedRuns(other.sessionId, other.user.user.id, env.AI_REVIEW_DAILY_LIMIT);
+    it("refuses a key the provider rejects, and keeps nothing", async () => {
+      keyCheck.mockResolvedValue({ ok: false, reason: "rejected", message: "Gemini rejected that key." });
+      const { auth, user } = await newUser();
 
-      const { auth, sessionId } = await setup();
-      const fileId = await addFile(auth, sessionId, "a.ts");
-      const res = await request(app).post(`/api/sessions/${sessionId}/ai-review`).set(auth).send({ fileId });
+      const res = await request(app)
+        .put("/api/llm-key")
+        .set(auth)
+        .send({ provider: "gemini", apiKey: "AIza-not-valid" });
 
-      expect(res.status).toBe(202);
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/rejected/);
+      expect(getCredential(user.id)).toBeNull();
+    });
+
+    it("rejects an unsupported provider before calling anyone", async () => {
+      const { auth } = await newUser();
+      const res = await request(app).put("/api/llm-key").set(auth).send({ provider: "openai", apiKey: "sk-123456789" });
+      expect(res.status).toBe(400);
+      expect(keyCheck).not.toHaveBeenCalled();
+    });
+
+    it("asks for a key instead of starting a review without one", async () => {
+      const { auth } = await newUser();
+      const session = await request(app).post("/api/sessions").set(auth).send({ title: "No key" });
+      const file = await request(app)
+        .post(`/api/sessions/${session.body.id}/files`)
+        .set(auth)
+        .send({ filePath: "a.ts", content: "const a = 1;\n", language: "typescript" });
+
+      for (const [path, body] of [
+        ["ai-review", { fileId: file.body.id }],
+        ["ai-review/batch", {}],
+      ] as const) {
+        const res = await request(app).post(`/api/sessions/${session.body.id}/${path}`).set(auth).send(body);
+        expect(res.status).toBe(428);
+        expect(res.body.code).toBe("llm_key_required");
+      }
+    });
+
+    it("forgets the key when the user removes it or logs out", async () => {
+      keyCheck.mockResolvedValue({ ok: true });
+      const { auth, user } = await newUser();
+
+      await request(app).put("/api/llm-key").set(auth).send({ provider: "gemini", apiKey: "AIza-valid-key" });
+      expect((await request(app).delete("/api/llm-key").set(auth)).status).toBe(204);
+      expect(getCredential(user.id)).toBeNull();
+
+      await request(app).put("/api/llm-key").set(auth).send({ provider: "gemini", apiKey: "AIza-valid-key" });
+      await request(app).post("/api/auth/logout").set(auth);
+      expect(getCredential(user.id)).toBeNull();
+    });
+
+    it("keeps each user's key to themselves", async () => {
+      keyCheck.mockResolvedValue({ ok: true });
+      const alice = await newUser();
+      const bob = await newUser();
+
+      await request(app).put("/api/llm-key").set(alice.auth).send({ provider: "gemini", apiKey: "alice-key-123" });
+
+      expect((await request(app).get("/api/llm-key").set(bob.auth)).body).toEqual({ configured: false });
+      expect(getCredential(bob.user.id)).toBeNull();
     });
   });
 

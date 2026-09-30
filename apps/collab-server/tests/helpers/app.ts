@@ -12,6 +12,7 @@ import sessionRoutes from "../../src/routes/sessions";
 import commentRoutes from "../../src/routes/comments";
 import fileRoutes from "../../src/routes/files";
 import aiReviewRoutes from "../../src/routes/ai-review";
+import llmKeyRoutes from "../../src/routes/llm-key";
 import { setupSocketHandlers } from "../../src/socket/handlers";
 
 /**
@@ -31,6 +32,7 @@ export function buildTestApp() {
 
   app.use(healthRoutes);
   app.use("/api/auth", authRoutes);
+  app.use("/api/llm-key", llmKeyRoutes);
   app.use("/api/sessions", sessionRoutes);
   app.use("/api/sessions/:sessionId/comments", commentRoutes);
   app.use("/api/sessions/:sessionId/files", fileRoutes);

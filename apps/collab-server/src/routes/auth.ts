@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { ZodError } from "zod";
 import { loginAccountLimiter } from "../lib/rate-limit";
+import { clearCredential } from "../lib/llm-credentials";
 import { prisma } from "@devcolab/database";
 import jwt from "jsonwebtoken";
 import type { Response } from "express";
@@ -77,6 +78,7 @@ router.post(
 
     if (identity) {
       await revokeTokens(identity.userId);
+      clearCredential(identity.userId);
       const io = req.app.get("io") as Server | undefined;
       io?.in(`user:${identity.userId}`).disconnectSockets(true);
     }

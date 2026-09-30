@@ -23,6 +23,8 @@ import sessionRoutes from "./routes/sessions";
 import commentRoutes from "./routes/comments";
 import fileRoutes from "./routes/files";
 import aiReviewRoutes from "./routes/ai-review";
+import llmKeyRoutes from "./routes/llm-key";
+import { scrubSentryEvent } from "./lib/sentry-scrub";
 import { setupSocketHandlers } from "./socket/handlers";
 import { reconcileStaleRuns, processRun } from "./services/ai-review-runner";
 import { startReviewWorker } from "./lib/queue";
@@ -34,6 +36,8 @@ if (env.SENTRY_DSN) {
     dsn: env.SENTRY_DSN,
     environment: env.NODE_ENV,
     tracesSampleRate: env.NODE_ENV === "production" ? 0.2 : 1.0,
+    // Sessions and users' own LLM keys must never leave in an error report.
+    beforeSend: scrubSentryEvent,
   });
   logger.info("Sentry initialized");
 }
@@ -104,6 +108,7 @@ app.use(apiLimiter);
 
 // Routes
 app.use("/api/auth", authLimiter, authRoutes);
+app.use("/api/llm-key", llmKeyRoutes);
 app.use("/api/sessions", sessionRoutes);
 app.use("/api/sessions/:sessionId/comments", commentRoutes);
 app.use("/api/sessions/:sessionId/files", fileRoutes);

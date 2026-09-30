@@ -71,11 +71,9 @@ services:
       - ENVIRONMENT=production
       - DATABASE_URL=postgresql://${POSTGRES_USER:-devcolab}:${POSTGRES_PASSWORD:-devcolab}@postgres:5432/${POSTGRES_DB:-devcolab}
       - "CORS_ORIGINS=${CORS_ORIGIN:?CORS_ORIGIN must be set}"
-      - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
+      # Users bring their own LLM keys; only the models are configured here.
       - GEMINI_MODEL=${GEMINI_MODEL:-gemini-3.6-flash}
-      - GROQ_API_KEY=${GROQ_API_KEY:-}
-      - HUGGINGFACE_API_TOKEN=${HUGGINGFACE_API_TOKEN:-}
-      - OLLAMA_HOST=${OLLAMA_HOST:-}
+      - GROQ_MODEL=${GROQ_MODEL:-llama-3.1-8b-instant}
       - "INTERNAL_API_KEY=${INTERNAL_API_KEY:?INTERNAL_API_KEY must be set}"
       - SENTRY_DSN=${SENTRY_DSN:-}
     ports:
