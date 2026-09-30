@@ -18,6 +18,10 @@ ARG NEXT_PUBLIC_COLLAB_SERVER_URL=http://localhost:4000
 ARG NEXT_PUBLIC_AI_SERVICE_URL=http://localhost:8000
 ENV NEXT_PUBLIC_COLLAB_SERVER_URL=$NEXT_PUBLIC_COLLAB_SERVER_URL
 ENV NEXT_PUBLIC_AI_SERVICE_URL=$NEXT_PUBLIC_AI_SERVICE_URL
+# Optional browser error reporting. Declared here because Docker only exposes
+# build args that are declared, and Render passes env vars in as build args.
+ARG NEXT_PUBLIC_SENTRY_DSN=
+ENV NEXT_PUBLIC_SENTRY_DSN=$NEXT_PUBLIC_SENTRY_DSN
 ENV NEXT_TELEMETRY_DISABLED=1
 
 COPY --from=deps /app/node_modules ./node_modules

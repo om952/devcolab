@@ -11,6 +11,7 @@
   "dependencies": {
     "@devcolab/database": "workspace:*",
     "@devcolab/shared-types": "workspace:*",
+    "@sentry/browser": "^10.69.0",
     "@types/prismjs": "^1.26.6",
     "next": "^15.5.26",
     "prismjs": "^1.30.0",

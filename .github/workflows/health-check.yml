@@ -1,0 +1,44 @@
+name: Health check
+
+# Checks the live site on a schedule. A failed run emails whoever last changed
+# this file's schedule (GitHub's default for scheduled workflows), so this is
+# the "site is down" alert, with no extra account needed.
+#
+# Every 6 hours, not every few minutes: each check wakes the sleeping free
+# services, and those wake-ups come out of Render's 750 free hours a month.
+# Four checks a day costs roughly 90 of them.
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      WEB_URL: ${{ vars.DEVCOLAB_WEB_URL || 'https://devcolab-web.onrender.com' }}
+      API_URL: ${{ vars.DEVCOLAB_API_URL || 'https://devcolab-api.onrender.com' }}
+      AI_URL: ${{ vars.DEVCOLAB_AI_URL || 'https://devcolab-ai.onrender.com' }}
+    steps:
+      # Retries cover a cold start: a sleeping service can take a minute or
+      # more to answer, which is normal and not an outage.
+      - name: Web app
+        run: curl -fsS --retry 6 --retry-delay 20 --retry-all-errors -m 120 "$WEB_URL/api/health"
+
+      - name: API and database
+        run: curl -fsS --retry 6 --retry-delay 20 --retry-all-errors -m 120 "$API_URL/health/ready"
+
+      - name: AI service
+        run: curl -fsS --retry 6 --retry-delay 20 --retry-all-errors -m 120 "$AI_URL/health/ready"
+
+      # The browser only ever talks to the web app, which proxies the API. A
+      # 401 here proves the proxy reaches a working API (no cookie was sent).
+      - name: Web-to-API proxy
+        run: |
+          code=$(curl -sS --retry 6 --retry-delay 20 --retry-all-errors -m 120 -o /dev/null -w '%{http_code}' "$WEB_URL/api/auth/me")
+          echo "GET /api/auth/me via the web app -> $code"
+          test "$code" = "401"
