@@ -1,0 +1,73 @@
+name: Database backup
+
+# Weekly encrypted dump of the Neon database, kept as a workflow artifact for
+# 90 days. Neon's free plan only keeps 6 hours of history, which covers a bad
+# deploy caught quickly but not a mistake found a week later.
+#
+# Encrypted because this repository is public: anyone signed in to GitHub can
+# download its artifacts. Without the passphrase the file is useless.
+#
+# Needs two repository secrets (Settings -> Secrets and variables -> Actions):
+#   NEON_DIRECT_URL     Neon's direct (unpooled) connection string
+#   BACKUP_PASSPHRASE   a long random passphrase; keep a copy somewhere safe,
+#                       since without it no backup can be restored
+# Restore steps are in docs/DEPLOYMENT.md.
+on:
+  schedule:
+    - cron: "41 3 * * 0" # Sundays, 03:41 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check configuration
+        id: config
+        env:
+          NEON_DIRECT_URL: ${{ secrets.NEON_DIRECT_URL }}
+          BACKUP_PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
+        run: |
+          if [ -z "$NEON_DIRECT_URL" ] || [ -z "$BACKUP_PASSPHRASE" ]; then
+            echo "::warning::Backup skipped: set NEON_DIRECT_URL and BACKUP_PASSPHRASE repository secrets."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          elif [ "${#BACKUP_PASSPHRASE}" -lt 20 ]; then
+            echo "::error::BACKUP_PASSPHRASE must be at least 20 characters."
+            exit 1
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # pg_dump must be at least as new as the server (Neon runs Postgres 18),
+      # and the runner's own client is older, so use the official image.
+      - name: Dump and encrypt
+        if: steps.config.outputs.ready == 'true'
+        env:
+          NEON_DIRECT_URL: ${{ secrets.NEON_DIRECT_URL }}
+          BACKUP_PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          stamp=$(date -u +%Y-%m-%dT%H%MZ)
+          echo "STAMP=$stamp" >> "$GITHUB_ENV"
+          docker run --rm -e NEON_DIRECT_URL postgres:18-alpine \
+            sh -c 'pg_dump --format=custom --no-owner --no-privileges "$NEON_DIRECT_URL"' \
+            > db.dump
+          # A dump of a working database is never this small; fail loudly
+          # rather than keep an empty "backup".
+          test "$(stat -c %s db.dump)" -gt 1024
+          gpg --batch --yes --symmetric --cipher-algo AES256 \
+            --passphrase-fd 3 --output "devcolab-$stamp.dump.gpg" db.dump 3<<<"$BACKUP_PASSPHRASE"
+          rm db.dump
+          ls -l "devcolab-$stamp.dump.gpg"
+
+      - name: Keep for 90 days
+        if: steps.config.outputs.ready == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: devcolab-db-${{ env.STAMP }}
+          path: devcolab-${{ env.STAMP }}.dump.gpg
+          retention-days: 90
+          if-no-files-found: error

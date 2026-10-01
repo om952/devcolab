@@ -178,6 +178,7 @@ openssl rand -hex 32   # use for INTERNAL_API_KEY
 | `TRUST_PROXY` | collab-server | Proxy hops to trust for client IPs. `0` when exposed directly, `1` behind one load balancer |
 | `AUTH_RATE_LIMIT_MAX` / `AUTH_RATE_LIMIT_WINDOW_MS` | collab-server | Login/register attempts allowed per IP per window. Defaults to 20 per 15 min |
 | `AUTH_ACCOUNT_RATE_LIMIT_MAX` | collab-server | Failed logins allowed per account per window (same window as above). Defaults to 10; does not depend on client IPs |
+| `NEXT_PUBLIC_SENTRY_DSN` / `SENTRY_DSN` | web / collab-server, ai-service | Optional error reporting. The web one is build-time. See docs/DEPLOYMENT.md |
 | `NEXT_PUBLIC_COLLAB_SERVER_URL` | web | **Build-time.** Where the web server proxies `/api` and `/socket.io`; compiled into the build, so set it as a Docker build arg, not at runtime |
 | `NEXT_PUBLIC_AI_SERVICE_URL` | web | Build-time, same as above |
 

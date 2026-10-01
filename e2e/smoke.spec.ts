@@ -334,6 +334,43 @@ test.describe("when the server is asleep", () => {
   });
 });
 
+test.describe("reliability", () => {
+  test("browser errors are reported, without the user's LLM key", async ({ page }) => {
+    const reports: string[] = [];
+    await page.route("http://localhost:3999/**", async (route) => {
+      reports.push(route.request().postData() ?? "");
+      await route.fulfill({ status: 200, headers: { "Access-Control-Allow-Origin": "*" }, body: "{}" });
+    });
+
+    await register(page);
+    const { row } = await createSession(page, "Sentry Probe");
+    await row.click();
+    await addLlmKey(page, "gsk_must_not_leak_987");
+
+    await page.evaluate(() => {
+      setTimeout(() => {
+        throw new Error("e2e-sentry-probe");
+      });
+    });
+
+    await expect.poll(() => reports.some((r) => r.includes("e2e-sentry-probe"))).toBe(true);
+    expect(reports.join("\n")).not.toContain("gsk_must_not_leak_987");
+    expect(reports.join("\n")).not.toContain("devcolab_session");
+  });
+
+  test("coming back to an idle tab wakes the API before the next click", async ({ page }) => {
+    await page.clock.install();
+    await register(page);
+
+    // Leave the tab alone past the idle threshold.
+    await page.clock.fastForward("11:00");
+
+    const wake = page.waitForRequest((req) => req.url().endsWith("/api/auth/me"));
+    await page.keyboard.press("Shift");
+    await wake;
+  });
+});
+
 test.describe("session visibility", () => {
   test("one user's dashboard does not show another user's session", async ({ browser }) => {
     const ownerCtx = await browser.newContext();

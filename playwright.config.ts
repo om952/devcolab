@@ -75,6 +75,9 @@ export default defineConfig({
       env: {
         NODE_ENV: "production",
         NEXT_PUBLIC_COLLAB_SERVER_URL: `http://localhost:${COLLAB_PORT}`,
+        // Points browser error reports at a dead local port; the suite
+        // intercepts them there to check what would be sent.
+        NEXT_PUBLIC_SENTRY_DSN: "http://e2epublickey@localhost:3999/1",
         NEXT_TELEMETRY_DISABLED: "1",
       },
     },

@@ -110,6 +110,34 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     };
   }, [clearAuth]);
 
+  // Free hosting puts the API to sleep after 15 minutes idle, and waking it
+  // takes 20-60 seconds. Every page load already starts that (the /me check
+  // above), but a tab left open is a different story: the user comes back,
+  // clicks, and waits. So the moment they come back, ask /me again. That wakes
+  // the API while they are still reading or typing, and also notices a session
+  // that was revoked from another device in the meantime.
+  useEffect(() => {
+    const IDLE_MS = 10 * 60 * 1000;
+    let lastActive = Date.now();
+
+    const onActivity = () => {
+      if (document.visibilityState !== "visible") return;
+      const idleFor = Date.now() - lastActive;
+      lastActive = Date.now();
+      if (idleFor < IDLE_MS) return;
+
+      fetch("/api/auth/me")
+        .then((res) => {
+          if (res.status === 401) clearAuth();
+        })
+        .catch(() => undefined);
+    };
+
+    const events = ["pointerdown", "keydown", "visibilitychange", "focus"] as const;
+    events.forEach((name) => window.addEventListener(name, onActivity, { passive: true }));
+    return () => events.forEach((name) => window.removeEventListener(name, onActivity));
+  }, [clearAuth]);
+
   const login = useCallback((newUser: User) => {
     localStorage.setItem(USER_KEY, JSON.stringify(newUser));
     setUser(newUser);
