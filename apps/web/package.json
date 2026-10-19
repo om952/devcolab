@@ -15,8 +15,8 @@
     "@types/prismjs": "^1.26.6",
     "next": "^15.5.26",
     "prismjs": "^1.30.0",
-    "react": "^19.2.8",
-    "react-dom": "^19.2.8",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
     "socket.io-client": "^4.8.4",
     "zod": "^3.23.8"
   },
@@ -25,7 +25,7 @@
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
     "autoprefixer": "^10.6.1",
-    "postcss": "^8.5.28",
+    "postcss": "^8.5.30",
     "tailwindcss": "^3.4.3",
     "typescript": "^5.4.5"
   }
